@@ -9,7 +9,7 @@ export default function NavBar() {
 
   function handleLogout() {
     window.localStorage.removeItem("margai_token");
-    router.push("/login");
+    router.push("/");
   }
 
   return (
