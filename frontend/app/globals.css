@@ -2421,3 +2421,25 @@ pre {
     flex-direction: column;
   }
 }
+.marg-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.marg-logout {
+  min-height: 38px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .marg-nav-start {
+    display: none;
+  }
+
+  .marg-logout {
+    min-height: 36px;
+    padding: 0 11px;
+  }
+}

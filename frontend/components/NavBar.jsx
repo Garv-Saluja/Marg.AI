@@ -1,10 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 export default function NavBar() {
   const pathname = usePathname();
+  const router = useRouter();
+
+  function handleLogout() {
+    window.localStorage.removeItem("margai_token");
+    router.push("/login");
+  }
 
   return (
     <nav className="marg-nav">
@@ -37,16 +43,22 @@ export default function NavBar() {
           </NavLink>
         </div>
 
-        <Link
-          href="/learn/mode"
-          className="marg-btn marg-btn-primary"
-          style={{
-            minHeight: 38,
-            padding: "0 14px",
-          }}
-        >
-          Start learning
-        </Link>
+        <div className="marg-nav-actions">
+          <Link
+            href="/learn/mode"
+            className="marg-btn marg-btn-primary marg-nav-start"
+          >
+            Start learning
+          </Link>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="marg-btn marg-btn-outline marg-logout"
+          >
+            Logout
+          </button>
+        </div>
       </div>
     </nav>
   );
