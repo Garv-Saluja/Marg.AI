@@ -5,20 +5,16 @@ import { useSearchParams } from "next/navigation";
 import { assessmentApi } from "../../../../lib/api";
 import NavBar from "../../../../components/NavBar";
 
-// Handles both:
-//   /learn/assessment/new?conceptId=X&type=diagnostic
-//   /learn/assessment/new?conceptId=X&type=reassessment
-// TODO(Frontend): also support ?subjectId=X&type=diagnostic for Full Syllabus Mode
 function AssessmentContent() {
   const params = useSearchParams();
   const conceptId = params.get("conceptId");
   const assessmentType = params.get("type") || "diagnostic";
 
-  const [assessment, setAssessment] = useState<any>(null);
-  const [questions, setQuestions] = useState<any[]>([]);
+  const [assessment, setAssessment] = useState(null);
+  const [questions, setQuestions] = useState([]);
   const [current, setCurrent] = useState(0);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [result, setResult] = useState<any>(null);
+  const [selected, setSelected] = useState(null);
+  const [result, setResult] = useState(null);
 
   useEffect(() => {
     assessmentApi
@@ -56,7 +52,7 @@ function AssessmentContent() {
   }
 
   if (result) {
-    const mastered = result.every((c: any) => c.status === "mastered");
+    const mastered = result.every((c) => c.status === "mastered");
 
     return (
       <>
@@ -65,7 +61,7 @@ function AssessmentContent() {
         <main style={{ maxWidth: 640, margin: "48px auto" }}>
           <h1>Assessment complete</h1>
 
-          {result.map((c: any) => (
+          {result.map((c) => (
             <p key={c.conceptId}>
               {c.conceptLabel}:{" "}
               <strong>{c.masteryScore}%</strong> ({c.status})
@@ -129,7 +125,7 @@ function AssessmentContent() {
           <p>{question.body}</p>
 
           <div style={{ display: "grid", gap: 8 }}>
-            {(question.options || []).map((opt: any) => (
+            {(question.options || []).map((opt) => (
               <label
                 key={opt.id}
                 style={{
