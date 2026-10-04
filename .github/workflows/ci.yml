@@ -59,3 +59,12 @@ jobs:
 
       - name: Check backend syntax
         run: node --check src/index.js
+
+  deploy-backend:
+    name: Deploy Backend to Render
+    needs: backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Render deployment
+        run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
