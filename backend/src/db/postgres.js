@@ -8,6 +8,10 @@ export const pool = new Pool({
   user: process.env.POSTGRES_USER || "margai",
   password: process.env.POSTGRES_PASSWORD || "margai_dev_password",
   database: process.env.POSTGRES_DB || "margai",
+  ssl: {
+    rejectUnauthorized: false
+  },
+  options: "-c sslmode=require"
 });
 
 export const query = (text, params) => pool.query(text, params);
