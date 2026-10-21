@@ -137,3 +137,92 @@ def test_full_syllabus_returns_recommendation_steps(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["steps"][0]["conceptId"] == "concept_a"
+
+def test_api_passes_mastery_scores_to_recommendation(monkeypatch):
+    captured = {}
+
+    def fake_single_topic_path(target_concept_id, mastery):
+        captured["target"] = target_concept_id
+        captured["mastery"] = mastery
+        return [
+            recommendation.StepOut(
+                conceptId=target_concept_id,
+                conceptLabel="Concept A",
+                reason="target_concept",
+            )
+        ]
+
+    monkeypatch.setattr(
+        recommendation,
+        "_single_topic_path",
+        fake_single_topic_path,
+    )
+
+    response = client.post(
+        "/recommend/path",
+        json={
+            "userId": "test-user",
+            "scope": "single_topic",
+            "targetConceptId": "concept_a",
+            "currentMastery": [
+                {
+                    "concept_id": "concept_b",
+                    "mastery_score": 90,
+                    "status": "mastered",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["target"] == "concept_a"
+    assert captured["mastery"] == {"concept_b": 90.0}
+
+
+def test_api_returns_complete_recommendation_response(monkeypatch):
+    def fake_single_topic_path(target_concept_id, mastery):
+        return [
+            recommendation.StepOut(
+                conceptId="concept_a",
+                conceptLabel="Concept A",
+                reason="target_concept",
+            ),
+            recommendation.StepOut(
+                conceptId="concept_b",
+                conceptLabel="Concept B",
+                reason="quick_revision",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        recommendation,
+        "_single_topic_path",
+        fake_single_topic_path,
+    )
+
+    response = client.post(
+        "/recommend/path",
+        json={
+            "userId": "test-user",
+            "scope": "single_topic",
+            "targetConceptId": "concept_a",
+            "currentMastery": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "steps": [
+            {
+                "conceptId": "concept_a",
+                "conceptLabel": "Concept A",
+                "reason": "target_concept",
+            },
+            {
+                "conceptId": "concept_b",
+                "conceptLabel": "Concept B",
+                "reason": "quick_revision",
+            },
+        ]
+    }
+    
