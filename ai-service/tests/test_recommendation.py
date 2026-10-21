@@ -1,7 +1,13 @@
 
+from unittest.mock import patch
+
+import pytest
 from fastapi import HTTPException
 
-from app.routers.recommendation import _topological_sort
+from app.routers.recommendation import (
+    _single_topic_path,
+    _topological_sort,
+)
 
 
 def test_prerequisite_comes_before_dependent():
@@ -26,27 +32,18 @@ def test_prerequisite_comes_before_dependent():
 
 def test_cycle_raises_http_409():
     rows = [
-        {
-            "id": "concept_a",
-            "label": "Concept A",
-            "dependsOn": ["concept_b"],
-        },
-        {
-            "id": "concept_b",
-            "label": "Concept B",
-            "dependsOn": ["concept_a"],
-        },
+        {"id": "concept_a", "label": "Concept A", "dependsOn": ["concept_b"]},
+        {"id": "concept_b", "label": "Concept B", "dependsOn": ["concept_a"]},
     ]
 
-    try:
+    with pytest.raises(HTTPException) as exc_info:
         _topological_sort(rows, raise_on_cycle=True)
-        assert False, "Expected HTTP 409 for a dependency cycle"
-    except HTTPException as exc:
-        assert exc.status_code == 409
-        assert set(exc.detail["unresolvedConceptIds"]) == {
-            "concept_a",
-            "concept_b",
-        }
+
+    assert exc_info.value.status_code == 409
+    assert set(exc_info.value.detail["unresolvedConceptIds"]) == {
+        "concept_a",
+        "concept_b",
+    }
 
 
 def test_independent_concepts_are_all_returned():
@@ -58,37 +55,64 @@ def test_independent_concepts_are_all_returned():
     result = _topological_sort(rows, raise_on_cycle=True)
 
     assert {node["id"] for node in result} == {"concept_a", "concept_b"}
-from app.routers.recommendation import _single_topic_path
 
 
-def test_mastered_prerequisite_is_skipped():
-    mastery = {
-        "dbms.intro_to_dbms": 75,
-    }
+@patch("app.routers.recommendation.run_query")
+def test_mastered_prerequisite_is_skipped(mock_query):
+    mock_query.side_effect = [
+        [{"id": "target", "label": "Target Concept"}],
+        [
+            {"id": "target", "label": "Target Concept"},
+            {"id": "prerequisite", "label": "Prerequisite Concept"},
+        ],
+        [
+            {
+                "id": "target",
+                "label": "Target Concept",
+                "dependsOn": ["prerequisite"],
+            },
+            {
+                "id": "prerequisite",
+                "label": "Prerequisite Concept",
+                "dependsOn": [],
+            },
+        ],
+    ]
 
     steps = _single_topic_path(
-        "dbms.third_normal_form",
-        mastery,
+        "target",
+        {"prerequisite": 75},
     )
 
-    concept_ids = {step.conceptId for step in steps}
+    ids = [step.conceptId for step in steps]
 
-    assert "dbms.intro_to_dbms" not in concept_ids
+    assert "prerequisite" not in ids
+    assert "target" in ids
 
 
-def test_revision_band_uses_quick_revision():
-    mastery = {
-        "dbms.normalization": 70,
-    }
+@patch("app.routers.recommendation.run_query")
+def test_revision_band_uses_quick_revision(mock_query):
+    mock_query.side_effect = [
+        [{"id": "target", "label": "Target Concept"}],
+        [
+            {"id": "target", "label": "Target Concept"},
+            {"id": "revision", "label": "Revision Concept"},
+        ],
+        [
+            {
+                "id": "target",
+                "label": "Target Concept",
+                "dependsOn": ["revision"],
+            },
+            {
+                "id": "revision",
+                "label": "Revision Concept",
+                "dependsOn": [],
+            },
+        ],
+    ]
 
-    steps = _single_topic_path(
-        "dbms.third_normal_form",
-        mastery,
-    )
+    steps = _single_topic_path("target", {"revision": 70})
+    revision_step = next(step for step in steps if step.conceptId == "revision")
 
-    normalization = next(
-        step for step in steps
-        if step.conceptId == "dbms.normalization"
-    )
-
-    assert normalization.reason == "quick_revision"
+    assert revision_step.reason == "quick_revision"
