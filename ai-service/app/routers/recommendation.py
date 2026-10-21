@@ -1,65 +1,31 @@
-"""
-Step 11: Personalized Learning Path generation.
 
-ALGORITHM (realistic scoring model, not deep learning — see brief Section 11):
+from heapq import heappop, heappush
+from typing import Literal
 
-For Single Topic Mode (target concept T):
-  1. Fetch T's full transitive prerequisite chain from Neo4j (already sorted
-     deepest-first by /graph/prerequisites/{T}).
-  2. For each concept C in [prerequisites..., T], compute a priority score:
-
-       priority(C) = w1*(100 - mastery(C))        # bigger gap -> higher priority
-                   + w2*difficulty(C)              # harder concepts need more runway
-                   + w3*importance(C)              # curriculum importance
-                   - w4*depth(C)                   # deeper prereqs go first regardless
-                                                     # (depth enforced by topological order,
-                                                     #  not by this score — see step 3)
-
-     Suggested weights for the MVP: w1=0.6, w2=0.2, w3=0.2, w4 unused directly
-     (depth is enforced structurally, see below).
-
-  3. Order: topological order of the prerequisite DAG (deepest first) is the
-     PRIMARY sort key — you cannot teach Normalization before Functional
-     Dependencies regardless of scores. The priority score above is only used
-     to decide INCLUSION (skip concepts already >= mastery threshold) and,
-     among concepts at the same depth, their relative order.
-  4. A concept is INCLUDED in the path only if mastery(C) < MASTERY_THRESHOLD
-     (default 75). Already-mastered prerequisites are skipped (e.g. Candidate
-     Keys at 72% might still be included as a "quick revision" step if just
-     below threshold — see REVISION_BAND below).
-
-For Full Syllabus Mode: run the same logic across every concept in the
-subject graph in topological order, batching by unit/topic.
-
-Example calculation (matches the brief's worked example):
-  Functional Dependencies: mastery=35  -> priority = 0.6*65 + 0.2*3 + 0.2*5 = 40.6  -> INCLUDE
-  Candidate Keys:          mastery=72  -> within REVISION_BAND (70-75)              -> INCLUDE as "quick revision"
-  Normalization:           mastery=25  -> priority = 0.6*75 + 0.2*4 + 0.2*5 = 46.8  -> INCLUDE (target)
-"""
-from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Optional, Literal
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from app.neo4j_client import run_query
 
 router = APIRouter(prefix="/recommend", tags=["recommend"])
 
 MASTERY_THRESHOLD = 75
-REVISION_BAND = (65, 75)  # mastery in this range -> include as a quick revision step
+REVISION_BAND = (65, 75)
+MAX_PREREQUISITE_DEPTH = 5
 
 
 class MasteryIn(BaseModel):
     concept_id: str
     mastery_score: float
-    status: Optional[str] = None
+    status: str | None = None
 
 
 class RecommendRequest(BaseModel):
     userId: str
     scope: Literal["single_topic", "full_syllabus"]
-    targetConceptId: Optional[str] = None
-    subjectId: Optional[str] = None
-    currentMastery: List[MasteryIn] = []
+    targetConceptId: str | None = None
+    subjectId: str | None = None
+    currentMastery: list[MasteryIn] = Field(default_factory=list)
 
 
 class StepOut(BaseModel):
@@ -69,92 +35,322 @@ class StepOut(BaseModel):
 
 
 class RecommendResponse(BaseModel):
-    steps: List[StepOut]
+    steps: list[StepOut]
 
 
-@router.post("/path", response_model=RecommendResponse)
-def recommend_path(req: RecommendRequest):
-    mastery_map = {m.concept_id: m.mastery_score for m in req.currentMastery}
+def _load_dependency_rows(concept_ids: list[str]) -> list[dict]:
+    """Load concepts, direct dependencies, and optional syllabus ordering."""
+    if not concept_ids:
+        return []
 
-    if req.scope == "single_topic":
-        return RecommendResponse(steps=_single_topic_path(req.targetConceptId, mastery_map))
-    return RecommendResponse(steps=_full_syllabus_path(req.subjectId, mastery_map))
+    return run_query(
+        """
+        UNWIND $conceptIds AS conceptId
+        MATCH (n:Concept {id: conceptId})
+        OPTIONAL MATCH (n)-[:REQUIRES]->(dep:Concept)
+        RETURN n.id AS id,
+               n.label AS label,
+               collect(DISTINCT dep.id) AS dependsOn
+        """,
+        conceptIds=concept_ids,
+    )
 
 
-def _single_topic_path(target_concept_id: str, mastery_map: dict) -> List[StepOut]:
-    rows = run_query(
+def _single_topic_path(
+    target_concept_id: str,
+    mastery_map: dict[str, float],
+) -> list[StepOut]:
+    """Keep existing single-topic behavior."""
+    target_rows = run_query(
         """
         MATCH (target:Concept {id: $conceptId})
-        OPTIONAL MATCH p = (target)-[:REQUIRES*1..5]->(prereq:Concept)
-        WITH target, collect(DISTINCT prereq) AS prereqs
-        UNWIND (prereqs + [target]) AS n
-        OPTIONAL MATCH (n)-[:REQUIRES]->(dep:Concept)
-        RETURN DISTINCT n.id AS id, n.label AS label, collect(DISTINCT dep.id) AS dependsOn
+        RETURN target.id AS id, target.label AS label
         """,
         conceptId=target_concept_id,
     )
 
-    ordered = _topological_sort(rows)
+    if not target_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Target concept not found",
+        )
 
-    steps = []
+    rows = run_query(
+        """
+        MATCH (target:Concept {id: $conceptId})
+        OPTIONAL MATCH (target)-[:REQUIRES*1..5]->(prereq:Concept)
+        WITH collect(DISTINCT target) + collect(DISTINCT prereq) AS concepts
+        UNWIND concepts AS n
+        WITH DISTINCT n
+        OPTIONAL MATCH (n)-[:REQUIRES]->(dep:Concept)
+        RETURN n.id AS id,
+               n.label AS label,
+               collect(DISTINCT dep.id) AS dependsOn
+        """,
+        conceptId=target_concept_id,
+    )
+
+    ordered = _topological_sort(rows, raise_on_cycle=False)
+    steps: list[StepOut] = []
+
     for node in ordered:
-        mastery = mastery_map.get(node["id"], 0)
-        if node["id"] == target_concept_id:
-            steps.append(StepOut(conceptId=node["id"], conceptLabel=node["label"], reason="target_concept"))
+        concept_id = node["id"]
+        mastery = mastery_map.get(concept_id, 0)
+
+        if concept_id == target_concept_id:
+            reason = "target_concept"
         elif mastery >= MASTERY_THRESHOLD:
-            continue  # already mastered, skip
+            continue
         elif REVISION_BAND[0] <= mastery < REVISION_BAND[1]:
-            steps.append(StepOut(conceptId=node["id"], conceptLabel=node["label"], reason="quick_revision"))
+            reason = "quick_revision"
         else:
-            steps.append(StepOut(conceptId=node["id"], conceptLabel=node["label"], reason="missing_prerequisite"))
+            reason = "missing_prerequisite"
+
+        steps.append(
+            StepOut(
+                conceptId=concept_id,
+                conceptLabel=node["label"],
+                reason=reason,
+            )
+        )
+
     return steps
 
 
-def _full_syllabus_path(subject_id: str, mastery_map: dict) -> List[StepOut]:
-    rows = run_query(
+def _full_syllabus_path(
+    subject_id: str,
+    mastery_map: dict[str, float],
+) -> list[StepOut]:
+    """Build a prerequisite-safe path with syllabus-order tie-breaking."""
+    syllabus_rows = run_query(
         """
-        MATCH (s:Subject {id: $subjectId})-[:HAS_UNIT]->(:Unit)-[:HAS_TOPIC]->(:Topic)-[:HAS_CONCEPT]->(c:Concept)
-        OPTIONAL MATCH (c)-[:REQUIRES]->(dep:Concept)
-        RETURN DISTINCT c.id AS id, c.label AS label, collect(DISTINCT dep.id) AS dependsOn
+        MATCH (s:Subject {id: $subjectId})
+              -[:HAS_UNIT]->(u:Unit)
+              -[:HAS_TOPIC]->(t:Topic)
+              -[:HAS_CONCEPT]->(c:Concept)
+        RETURN DISTINCT
+               c.id AS id,
+               c.label AS label,
+               coalesce(u.order, 999999) AS unitOrder,
+               coalesce(t.order, 999999) AS topicOrder
         """,
         subjectId=subject_id,
     )
-    ordered = _topological_sort(rows)
-    steps = []
+
+    if not syllabus_rows:
+        subject_exists = run_query(
+            """
+            MATCH (s:Subject {id: $subjectId})
+            RETURN s.id AS id
+            """,
+            subjectId=subject_id,
+        )
+        if not subject_exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Subject not found",
+            )
+        return []
+
+    # Record stable curriculum positions for concepts in this subject.
+    syllabus_order: dict[str, tuple[int, int, str]] = {}
+    syllabus_labels: dict[str, str] = {}
+
+    for row in syllabus_rows:
+        concept_id = row.get("id")
+        if not concept_id:
+            continue
+
+        syllabus_order[str(concept_id)] = (
+            int(row.get("unitOrder", 999999)),
+            int(row.get("topicOrder", 999999)),
+            str(row.get("label") or concept_id).casefold(),
+        )
+        syllabus_labels[str(concept_id)] = str(
+            row.get("label") or concept_id
+        )
+
+    syllabus_ids = set(syllabus_order)
+
+    # Include prerequisites reachable from syllabus concepts.
+    closure_rows = run_query(
+        """
+        MATCH (s:Subject {id: $subjectId})
+              -[:HAS_UNIT]->(:Unit)
+              -[:HAS_TOPIC]->(:Topic)
+              -[:HAS_CONCEPT]->(c:Concept)
+        OPTIONAL MATCH (c)-[:REQUIRES*1..5]->(p:Concept)
+        RETURN collect(DISTINCT c.id) AS syllabusIds,
+               collect(DISTINCT p.id) AS prerequisiteIds
+        """,
+        subjectId=subject_id,
+    )
+
+    if not closure_rows:
+        return []
+
+    all_ids = set(closure_rows[0].get("syllabusIds") or [])
+    all_ids.update(closure_rows[0].get("prerequisiteIds") or [])
+    all_ids.discard(None)
+
+    rows = _load_dependency_rows(sorted(all_ids))
+
+    # Apply syllabus order only as a tie-breaker among currently eligible nodes.
+    ordered = _topological_sort(
+        rows,
+        raise_on_cycle=True,
+        preferred_order=syllabus_order,
+    )
+
+    steps: list[StepOut] = []
+
     for node in ordered:
-        mastery = mastery_map.get(node["id"], 0)
+        concept_id = node["id"]
+        mastery = mastery_map.get(concept_id, 0)
+
         if mastery >= MASTERY_THRESHOLD:
             continue
-        reason = "quick_revision" if REVISION_BAND[0] <= mastery < REVISION_BAND[1] else "syllabus_concept"
-        steps.append(StepOut(conceptId=node["id"], conceptLabel=node["label"], reason=reason))
+
+        if REVISION_BAND[0] <= mastery < REVISION_BAND[1]:
+            reason = "quick_revision"
+        elif concept_id in syllabus_ids:
+            reason = "syllabus_concept"
+        else:
+            reason = "missing_prerequisite"
+
+        steps.append(
+            StepOut(
+                conceptId=concept_id,
+                conceptLabel=node["label"],
+                reason=reason,
+            )
+        )
+
     return steps
 
 
-def _topological_sort(rows: List[dict]) -> List[dict]:
-    """Simple Kahn's-algorithm topological sort over the REQUIRES DAG.
-    rows: [{id, label, dependsOn: [ids]}]. Falls back gracefully on cycles
-    (shouldn't happen with well-formed prerequisite data, but don't hard-crash
-    a demo over one bad edge)."""
-    by_id = {r["id"]: r for r in rows}
-    in_degree = {r["id"]: len([d for d in r["dependsOn"] if d and d in by_id]) for r in rows}
-    queue = [rid for rid, deg in in_degree.items() if deg == 0]
-    ordered = []
-    visited = set()
+def _topological_sort(
+    rows: list[dict],
+    *,
+    raise_on_cycle: bool = False,
+    preferred_order: dict[str, tuple[int, int, str]] | None = None,
+) -> list[dict]:
+    """
+    Return prerequisites before dependent concepts.
+    Preferred curriculum order breaks ties without violating dependencies.
+    """
+    preferred_order = preferred_order or {}
+    by_id: dict[str, dict] = {}
+
+    for row in rows:
+        concept_id = row.get("id")
+        if not concept_id:
+            continue
+
+        by_id[str(concept_id)] = {
+            "id": str(concept_id),
+            "label": str(row.get("label") or concept_id),
+            "dependsOn": list(row.get("dependsOn") or []),
+        }
+
+    in_degree: dict[str, int] = {}
+    dependents: dict[str, list[str]] = {
+        concept_id: [] for concept_id in by_id
+    }
+
+    for concept_id, node in by_id.items():
+        dependencies = {
+            dep for dep in node["dependsOn"]
+            if dep and dep in by_id
+        }
+        node["dependsOn"] = sorted(dependencies)
+        in_degree[concept_id] = len(dependencies)
+
+        for dependency in dependencies:
+            dependents[dependency].append(concept_id)
+
+    def priority(concept_id: str) -> tuple:
+        node = by_id[concept_id]
+        curriculum = preferred_order.get(
+            concept_id,
+            (999999, 999999, node["label"].casefold()),
+        )
+        return (*curriculum, node["label"].casefold(), concept_id)
+
+    queue: list[tuple[tuple, str]] = []
+
+    for concept_id, degree in in_degree.items():
+        if degree == 0:
+            heappush(queue, (priority(concept_id), concept_id))
+
+    ordered: list[dict] = []
 
     while queue:
-        current = queue.pop(0)
-        if current in visited:
-            continue
-        visited.add(current)
-        ordered.append(by_id[current])
-        for r in rows:
-            if current in (r["dependsOn"] or []):
-                in_degree[r["id"]] -= 1
-                if in_degree[r["id"]] == 0:
-                    queue.append(r["id"])
+        _, concept_id = heappop(queue)
+        ordered.append(by_id[concept_id])
 
-    # append any unresolved nodes (cycle fallback) so nothing silently disappears
-    for r in rows:
-        if r["id"] not in visited:
-            ordered.append(r)
+        for dependent_id in dependents[concept_id]:
+            in_degree[dependent_id] -= 1
+            if in_degree[dependent_id] == 0:
+                heappush(
+                    queue,
+                    (priority(dependent_id), dependent_id),
+                )
+
+    if len(ordered) != len(by_id):
+        unresolved = sorted(
+            concept_id
+            for concept_id, degree in in_degree.items()
+            if degree > 0
+        )
+
+        if raise_on_cycle:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        "Prerequisite graph contains a cycle; "
+                        "a valid learning path cannot be generated."
+                    ),
+                    "unresolvedConceptIds": unresolved,
+                },
+            )
+
+        # Preserve existing single-topic fallback behavior.
+        for concept_id in unresolved:
+            ordered.append(by_id[concept_id])
+
     return ordered
+
+
+@router.post("/path", response_model=RecommendResponse)
+def recommend_path(req: RecommendRequest):
+    mastery_map = {
+        mastery.concept_id: mastery.mastery_score
+        for mastery in req.currentMastery
+    }
+
+    if req.scope == "single_topic":
+        if not req.targetConceptId:
+            raise HTTPException(
+                status_code=422,
+                detail="targetConceptId is required for single_topic mode",
+            )
+
+        steps = _single_topic_path(
+            req.targetConceptId,
+            mastery_map,
+        )
+    else:
+        if not req.subjectId:
+            raise HTTPException(
+                status_code=422,
+                detail="subjectId is required for full_syllabus mode",
+            )
+
+        steps = _full_syllabus_path(
+            req.subjectId,
+            mastery_map,
+        )
+
+    return RecommendResponse(steps=steps)
