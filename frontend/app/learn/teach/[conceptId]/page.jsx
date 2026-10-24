@@ -96,31 +96,45 @@ export default function TeachingPage({ params }) {
     }
   }
 
-  async function askDoubt(e) {
-    e.preventDefault();
 
-    if (!question.trim()) return;
 
-    setDoubtLoading(true);
-    setError("");
+async function askDoubt(e) {
+  e.preventDefault();
 
-    try {
-      const result = await teachApi.ask({
-        conceptId,
-        question: question.trim(),
-      });
+  const trimmedQuestion = question.trim();
 
-      setDoubtAnswer(result.text);
-    } catch (err) {
-      setError(
-        err?.response?.data?.error ||
-          err?.response?.data?.detail ||
-          "We couldn't answer your question. Please try again."
-      );
-    } finally {
-      setDoubtLoading(false);
-    }
+  if (!trimmedQuestion) return;
+
+  setDoubtLoading(true);
+  setError("");
+
+  try {
+    const result = await teachApi.ask({
+      conceptId,
+      question: trimmedQuestion,
+      stepId: stepId || undefined,
+      subjectId: searchParams.get("subjectId") || undefined,
+    });
+
+    setDoubtAnswer(result.text);
+  } catch (err) {
+    console.error(
+      "Ask doubt error:",
+      err?.response?.status,
+      err?.response?.data || err.message
+    );
+
+    setError(
+      err?.response?.data?.error ||
+        err?.response?.data?.detail ||
+        "We couldn't answer your question. Please try again."
+    );
+  } finally {
+    setDoubtLoading(false);
   }
+}
+
+
 
   return (
     <>

@@ -6,13 +6,17 @@ const AI_SERVICE_URL =
 
 const client = axios.create({
   baseURL: AI_SERVICE_URL,
-  timeout: 180000, // 3 minutes for LLM processing
+  timeout: 180000,
 });
 
 export const aiService = {
   // Syllabus text -> structured concepts + knowledge graph
   extractConcepts: (payload) =>
     client.post("/concepts/extract", payload).then((r) => r.data),
+
+  // Index syllabus text into persistent RAG storage
+  indexSyllabus: (payload) =>
+    client.post("/teach/index-syllabus", payload).then((r) => r.data),
 
   // Knowledge graph
   getPrerequisites: (conceptId) =>

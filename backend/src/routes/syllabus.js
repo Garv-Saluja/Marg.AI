@@ -163,6 +163,7 @@ router.post("/:syllabusId/process", requireAuth, async (req, res) => {
               s.uploaded_by,
               s.raw_text,
               s.status,
+              s.original_filename,
               sub.name AS subject_name
        FROM syllabi s
        JOIN subjects sub ON sub.subject_id = s.subject_id
@@ -185,7 +186,7 @@ router.post("/:syllabusId/process", requireAuth, async (req, res) => {
       });
     }
 
-    // Correct call matching your existing aiServiceClient.js.
+    // Existing syllabus -> structured concepts + knowledge graph.
     const aiResult = await aiService.extractConcepts({
       syllabusId: syllabus.syllabus_id,
       subjectId: syllabus.subject_id,
@@ -197,6 +198,26 @@ router.post("/:syllabusId/process", requireAuth, async (req, res) => {
 
       return res.status(502).json({
         message: "AI service returned an unexpected response.",
+      });
+    }
+
+    // NEW: Index the syllabus into persistent, subject-aware RAG storage.
+    const ragResult = await aiService.indexSyllabus({
+      syllabusId: syllabus.syllabus_id,
+      subjectId: syllabus.subject_id,
+      rawText: syllabus.raw_text,
+      sourceFilename: syllabus.original_filename,
+    });
+
+    if (
+      !Number.isInteger(ragResult?.chunksIndexed) ||
+      ragResult.chunksIndexed <= 0
+    ) {
+      console.error("Unexpected RAG indexing response:", ragResult);
+
+      return res.status(502).json({
+        message:
+          "Syllabus concepts were extracted, but RAG indexing did not complete.",
       });
     }
 
@@ -288,6 +309,7 @@ router.post("/:syllabusId/process", requireAuth, async (req, res) => {
         units: savedUnits,
         topics: savedTopics,
         concepts: savedConcepts,
+        ragChunks: ragResult.chunksIndexed,
       },
     });
   } catch (error) {

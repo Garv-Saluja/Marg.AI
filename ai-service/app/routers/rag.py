@@ -1,95 +1,101 @@
-"""
-Step 7-G/8: RAG (Retrieval-Augmented Generation) for AI doubt support.
 
-Pipeline (Section 8 of the brief):
-  Documents -> Text Extraction -> Chunking -> Embeddings -> Vector DB -> Retrieval
-  -> Relevant Context -> LLM -> Personalized Explanation
-
-For an MVP scale (a handful of subjects, a few hundred pages of notes total):
-  - Chunking: ~300-500 tokens per chunk, naive fixed-size or paragraph-based.
-    No need for fancy semantic chunking for a capstone.
-  - Embeddings: sentence-transformers (all-MiniLM-L6-v2) run locally — free,
-    fast enough, no API cost. Swap EMBEDDING_PROVIDER=openai if you'd rather
-    use an API and skip the ~90MB model download.
-  - Vector DB: an in-memory list of (chunk, embedding) pairs is genuinely fine
-    for a capstone (few thousand chunks max). Don't reach for Pinecone/Weaviate
-    unless you want the extra infra complexity for its own sake. `pgvector`
-    (a Postgres extension) is the natural "upgrade" if you want persistence
-    without adding a new database.
-  - Retrieval: cosine similarity, top-k (k=3-5), optionally filtered to chunks
-    tagged with the current concept_id so a DBMS question doesn't retrieve OS notes.
-
-This file ships a minimal in-memory store (`_VECTOR_STORE`) and a mock
-embedding function so the /teach/rag-answer contract is stable immediately;
-swap `_embed` and `_VECTOR_STORE` for the real pipeline without changing the
-request/response shape the backend depends on.
-"""
-from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Optional
 import os
-import math
-import random
+from functools import lru_cache
+from typing import List, Optional
+
+import psycopg
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from app.llm_client import llm
 
 router = APIRouter(prefix="/teach", tags=["teach"])
 
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "mock")
-
-# In-memory vector store: list of {conceptId, text, embedding, source}
-# TODO: replace with pgvector or a real vector DB once resources are uploaded
-# at scale. Seed a few example chunks so /rag-answer has something to retrieve.
-_VECTOR_STORE: List[dict] = [
-    {
-        "conceptId": "dbms.functional_dependencies",
-        "text": "A functional dependency X -> Y means that the value of attribute set X "
-        "uniquely determines the value of attribute set Y in a relation.",
-        "source": "seed_notes.md",
-    },
-    {
-        "conceptId": "dbms.normalization",
-        "text": "Normalization is the process of organizing columns and tables to minimize "
-        "data redundancy and avoid update/insert/delete anomalies.",
-        "source": "seed_notes.md",
-    },
-]
+DATABASE_URL = os.getenv("DATABASE_URL")
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "mock").lower()
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "sentence-transformers/all-MiniLM-L6-v2",
+)
 
 
-def _embed(text: str) -> List[float]:
-    if EMBEDDING_PROVIDER == "mock":
-        # Deterministic pseudo-embedding (hash-based) so cosine similarity is at
-        # least stable/repeatable for demo purposes. NOT semantically meaningful.
-        random.seed(hash(text) % (2**32))
-        return [random.random() for _ in range(16)]
-    # TODO: real embeddings
-    #   if EMBEDDING_PROVIDER == "local": use sentence-transformers
-    #   if EMBEDDING_PROVIDER == "openai": call the OpenAI embeddings endpoint
-    raise NotImplementedError(f"Embedding provider '{EMBEDDING_PROVIDER}' not implemented yet")
+@lru_cache(maxsize=1)
+def _model():
+    if EMBEDDING_PROVIDER != "local":
+        raise RuntimeError("Set EMBEDDING_PROVIDER=local")
+
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(EMBEDDING_MODEL, device="cpu")
 
 
-def _cosine(a: List[float], b: List[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+@lru_cache(maxsize=4096)
+def _embed(text: str) -> tuple:
+    vector = _model().encode(
+        text,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+    return tuple(float(value) for value in vector)
 
 
-def retrieve(concept_id: str, question: str, k: int = 3) -> List[dict]:
-    candidates = [c for c in _VECTOR_STORE if c["conceptId"] == concept_id] or _VECTOR_STORE
-    if EMBEDDING_PROVIDER == "mock":
-        # mock embeddings aren't meaningful, so just return the concept-filtered chunks
-        return candidates[:k]
-    q_emb = _embed(question)
-    scored = [(c, _cosine(q_emb, _embed(c["text"]))) for c in candidates]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [c for c, _ in scored[:k]]
+def _vector_literal(text: str) -> str:
+    return "[" + ",".join(str(value) for value in _embed(text)) + "]"
+
+
+def _db():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured for the AI service")
+
+    return psycopg.connect(DATABASE_URL)
+
+
+def _chunks(text: str, max_chars: int = 1600, overlap: int = 200):
+    """Split any syllabus into overlapping text chunks."""
+    text = text.strip()
+
+    if not text:
+        return []
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+
+        if end < len(text):
+            boundary = max(
+                text.rfind("\n", start, end),
+                text.rfind(". ", start, end),
+            )
+            if boundary > start + max_chars // 2:
+                end = boundary + 1
+
+        content = text[start:end].strip()
+
+        if content:
+            chunks.append(content)
+
+        if end >= len(text):
+            break
+
+        start = max(start + 1, end - overlap)
+
+    return chunks
+
+
+class IndexSyllabusRequest(BaseModel):
+    syllabusId: str
+    subjectId: str
+    rawText: str = Field(min_length=1)
+    sourceFilename: Optional[str] = None
 
 
 class RagRequest(BaseModel):
     userId: str
     conceptId: str
-    question: str
+    question: str = Field(min_length=1)
+    subjectId: str = Field(min_length=1)
 
 
 class RagResponse(BaseModel):
@@ -97,22 +103,185 @@ class RagResponse(BaseModel):
     sources: List[dict]
 
 
+@router.post("/index-syllabus")
+def index_syllabus(req: IndexSyllabusRequest):
+    """Index or replace the chunks for one uploaded syllabus."""
+    if EMBEDDING_PROVIDER != "local":
+        raise HTTPException(
+            status_code=503,
+            detail="Real embeddings are not enabled.",
+        )
+
+    chunks = _chunks(req.rawText)
+
+    if not chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="No text to index.",
+        )
+
+    try:
+        # Validate the IDs before doing the more expensive embedding work.
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM syllabi
+                    WHERE syllabus_id = %s::uuid
+                      AND subject_id = %s::uuid
+                    """,
+                    (req.syllabusId, req.subjectId),
+                )
+
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Syllabus/subject pair was not found.",
+                    )
+
+        prepared = [
+            (
+                req.syllabusId,
+                req.subjectId,
+                index,
+                content,
+                _vector_literal(content),
+                req.sourceFilename,
+            )
+            for index, content in enumerate(chunks)
+        ]
+
+        # Delete and insert within one transaction so failed indexing
+        # does not leave a partially replaced set of chunks.
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM rag_chunks
+                    WHERE syllabus_id = %s::uuid
+                    """,
+                    (req.syllabusId,),
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO rag_chunks
+                        (syllabus_id, subject_id, chunk_index, content,
+                         embedding, source_filename)
+                    VALUES
+                        (%s::uuid, %s::uuid, %s, %s, %s::vector, %s)
+                    """,
+                    prepared,
+                )
+
+        return {
+            "message": "Syllabus indexed successfully.",
+            "syllabusId": req.syllabusId,
+            "subjectId": req.subjectId,
+            "chunksIndexed": len(prepared),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"RAG indexing error: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to index syllabus.",
+        ) from exc
+
+
+def retrieve(
+    question: str,
+    subject_id: str,
+    k: int = 4,
+) -> List[dict]:
+    """Retrieve the most relevant chunks from the requested subject."""
+    if EMBEDDING_PROVIDER != "local":
+        raise RuntimeError("Set EMBEDDING_PROVIDER=local")
+
+    if not subject_id:
+        raise ValueError("subjectId is required")
+
+    query_vector = _vector_literal(question)
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT chunk_id, syllabus_id, subject_id,
+                       content, source_filename,
+                       embedding <=> %s::vector AS distance
+                FROM rag_chunks
+                WHERE subject_id = %s::uuid
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_vector, subject_id, query_vector, k),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "chunkId": row[0],
+            "syllabusId": str(row[1]),
+            "subjectId": str(row[2]),
+            "text": row[3],
+            "source": row[4] or "uploaded syllabus",
+            "score": 1.0 - float(row[5]),
+        }
+        for row in rows
+    ]
+
+
 @router.post("/rag-answer", response_model=RagResponse)
 def rag_answer(req: RagRequest):
-    retrieved = retrieve(req.conceptId, req.question)
-    context = "\n".join(f"- {c['text']} (source: {c['source']})" for c in retrieved)
+    try:
+        retrieved = retrieve(
+            question=req.question,
+            subject_id=req.subjectId,
+        )
+    except Exception as exc:
+        print(f"RAG retrieval error: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="RAG retrieval is unavailable.",
+        ) from exc
+
+    context = "\n".join(
+        f"- {item['text']} (source: {item['source']})"
+        for item in retrieved
+    )
+
+    if not context:
+        context = "No indexed learning material was found for this subject."
 
     system = (
-        "You are a CS tutor answering a student's doubt. Use ONLY the provided context "
-        "where relevant; if the context doesn't cover the question, say so honestly rather "
-        "than inventing facts. Keep the answer focused and concise."
+        "You are a helpful tutor. Answer using the provided learning context. "
+        "If the context does not contain enough information, say so honestly. "
+        "Do not invent facts or claim that information came from a source "
+        "that was not provided. Keep the answer focused and clear."
     )
-    user = f"Context:\n{context}\n\nStudent's question about {req.conceptId}: {req.question}"
 
-    text = llm.complete(
-    system=system,
-    user=user,
-    max_tokens=1000,
-    response_format=None,
+    user = (
+        f"Concept: {req.conceptId}\n"
+        f"Retrieved context:\n{context}\n\n"
+        f"Student question: {req.question}"
     )
-    return RagResponse(text=text, sources=retrieved)
+
+    try:
+        answer = llm.complete(
+            system=system,
+            user=user,
+            max_tokens=1000,
+            response_format=None,
+        )
+    except Exception as exc:
+        print(f"RAG LLM error: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to generate the answer.",
+        ) from exc
+
+    return RagResponse(text=answer, sources=retrieved)
