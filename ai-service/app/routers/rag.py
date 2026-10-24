@@ -1,4 +1,5 @@
 
+import gc
 import os
 from functools import lru_cache
 from typing import List, Optional
@@ -18,7 +19,7 @@ EMBEDDING_MODEL = os.getenv(
     "sentence-transformers/all-MiniLM-L6-v2",
 )
 
-
+# Keep one model instance for the lifetime of the process.
 @lru_cache(maxsize=1)
 def _model():
     if EMBEDDING_PROVIDER != "local":
@@ -29,14 +30,16 @@ def _model():
     return SentenceTransformer(EMBEDDING_MODEL, device="cpu")
 
 
-@lru_cache(maxsize=4096)
+# Do not cache thousands of embeddings in RAM.
 def _embed(text: str) -> tuple:
     vector = _model().encode(
-        text,
+        [text],
+        batch_size=1,
         normalize_embeddings=True,
         convert_to_numpy=True,
+        show_progress_bar=False,
     )
-    return tuple(float(value) for value in vector)
+    return tuple(float(value) for value in vector[0])
 
 
 def _vector_literal(text: str) -> str:
@@ -51,7 +54,7 @@ def _db():
 
 
 def _chunks(text: str, max_chars: int = 1600, overlap: int = 200):
-    """Split any syllabus into overlapping text chunks."""
+    """Split syllabus text into overlapping chunks."""
     text = text.strip()
 
     if not text:
@@ -105,7 +108,7 @@ class RagResponse(BaseModel):
 
 @router.post("/index-syllabus")
 def index_syllabus(req: IndexSyllabusRequest):
-    """Index or replace the chunks for one uploaded syllabus."""
+    """Replace syllabus chunks using incremental embedding batches."""
     if EMBEDDING_PROVIDER != "local":
         raise HTTPException(
             status_code=503,
@@ -115,13 +118,13 @@ def index_syllabus(req: IndexSyllabusRequest):
     chunks = _chunks(req.rawText)
 
     if not chunks:
-        raise HTTPException(
-            status_code=400,
-            detail="No text to index.",
-        )
+        raise HTTPException(status_code=400, detail="No text to index.")
+
+    batch_size = 4
+    indexed_count = 0
 
     try:
-        # Validate the IDs before doing the more expensive embedding work.
+        # One transaction ensures a failed replacement is rolled back.
         with _db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -140,22 +143,6 @@ def index_syllabus(req: IndexSyllabusRequest):
                         detail="Syllabus/subject pair was not found.",
                     )
 
-        prepared = [
-            (
-                req.syllabusId,
-                req.subjectId,
-                index,
-                content,
-                _vector_literal(content),
-                req.sourceFilename,
-            )
-            for index, content in enumerate(chunks)
-        ]
-
-        # Delete and insert within one transaction so failed indexing
-        # does not leave a partially replaced set of chunks.
-        with _db() as conn:
-            with conn.cursor() as cur:
                 cur.execute(
                     """
                     DELETE FROM rag_chunks
@@ -164,22 +151,54 @@ def index_syllabus(req: IndexSyllabusRequest):
                     (req.syllabusId,),
                 )
 
-                cur.executemany(
-                    """
-                    INSERT INTO rag_chunks
-                        (syllabus_id, subject_id, chunk_index, content,
-                         embedding, source_filename)
-                    VALUES
-                        (%s::uuid, %s::uuid, %s, %s, %s::vector, %s)
-                    """,
-                    prepared,
-                )
+                for start in range(0, len(chunks), batch_size):
+                    batch = chunks[start:start + batch_size]
+
+                    embeddings = _model().encode(
+                        batch,
+                        batch_size=1,
+                        normalize_embeddings=True,
+                        convert_to_numpy=True,
+                        show_progress_bar=False,
+                    )
+
+                    prepared = [
+                        (
+                            req.syllabusId,
+                            req.subjectId,
+                            start + offset,
+                            content,
+                            "[" + ",".join(
+                                str(float(value)) for value in embedding
+                            ) + "]",
+                            req.sourceFilename,
+                        )
+                        for offset, (content, embedding)
+                        in enumerate(zip(batch, embeddings))
+                    ]
+
+                    cur.executemany(
+                        """
+                        INSERT INTO rag_chunks
+                            (syllabus_id, subject_id, chunk_index,
+                             content, embedding, source_filename)
+                        VALUES
+                            (%s::uuid, %s::uuid, %s, %s,
+                             %s::vector, %s)
+                        """,
+                        prepared,
+                    )
+
+                    indexed_count += len(prepared)
+
+                    del prepared, embeddings, batch
+                    gc.collect()
 
         return {
             "message": "Syllabus indexed successfully.",
             "syllabusId": req.syllabusId,
             "subjectId": req.subjectId,
-            "chunksIndexed": len(prepared),
+            "chunksIndexed": indexed_count,
         }
 
     except HTTPException:
@@ -197,7 +216,7 @@ def retrieve(
     subject_id: str,
     k: int = 4,
 ) -> List[dict]:
-    """Retrieve the most relevant chunks from the requested subject."""
+    """Retrieve relevant chunks from the requested subject."""
     if EMBEDDING_PROVIDER != "local":
         raise RuntimeError("Set EMBEDDING_PROVIDER=local")
 
