@@ -83,17 +83,18 @@ export default function LearningPathPage({ params }) {
     (step) => step.status === "completed"
   ).length;
 
-  const currentStep = steps.find(
-    (step) =>
-      step.status === "in_progress" ||
-      step.status === "active"
+  // The API returns steps in prerequisite-safe order. Until the API exposes
+  // explicit dependency IDs, unlock only the first incomplete step.
+  const firstIncompleteIndex = steps.findIndex(
+    (step) => step.status !== "completed"
   );
+
+  const currentStep =
+    firstIncompleteIndex >= 0 ? steps[firstIncompleteIndex] : null;
 
   const progress =
     steps.length > 0
-      ? Math.round(
-          (completedSteps / steps.length) * 100
-        )
+      ? Math.round((completedSteps / steps.length) * 100)
       : 0;
 
   return (
@@ -273,7 +274,7 @@ export default function LearningPathPage({ params }) {
                       {currentStep.concept_label}
                     </h2>
 
-                    {currentStep.reason && (
+                    {currentStep.reason && currentStep.reason !== "syllabus_concept" && (
                       <p
                         style={{
                           marginTop: 8,
@@ -281,7 +282,11 @@ export default function LearningPathPage({ params }) {
                           fontSize: 14,
                         }}
                       >
-                        {currentStep.reason}
+                        {currentStep.reason === "quick_revision"
+                          ? "Quick revision"
+                          : currentStep.reason === "missing_prerequisite"
+                            ? "Prerequisite to learn"
+                            : currentStep.reason}
                       </p>
                     )}
                   </div>
@@ -297,163 +302,140 @@ export default function LearningPathPage({ params }) {
             </section>
           )}
 
-          {/* Learning sequence */}
+          {/* Branching skill tree */}
           <section>
-            <div style={{ marginBottom: 24 }}>
-              <div className="marg-page-eyebrow">
-                LEARNING SEQUENCE
-              </div>
-
-              <h2
-                style={{
-                  marginTop: 8,
-                  fontSize: 36,
-                }}
-              >
-                Your concepts.
-              </h2>
-
-              <p
-                style={{
-                  marginTop: 8,
-                  color: "var(--marg-muted)",
-                }}
-              >
-                Work through each concept in sequence.
+            <div style={{ marginBottom: 28 }}>
+              <div className="marg-page-eyebrow">LEARNING SEQUENCE</div>
+              <h2 style={{ marginTop: 8, fontSize: 36 }}>Your skill tree.</h2>
+              <p style={{ marginTop: 8, color: "var(--marg-muted)", maxWidth: 620 }}>
+                Complete the available concept to unlock the next step. Locked concepts open as you progress.
               </p>
             </div>
 
-            <div className="marg-path">
-              {steps.map((step, index) => {
-                const completed =
-                  step.status === "completed";
+            {steps.length === 0 ? (
+              <div className="marg-card" style={{ padding: 24 }}>
+                No concepts were found for this learning path. Try generating the path again.
+              </div>
+            ) : (
+              <div style={{
+                position: "relative",
+                padding: "28px 12px 36px",
+                border: "1px solid var(--marg-border)",
+                borderRadius: 20,
+                background: "var(--marg-card, var(--marg-canvas))",
+                overflow: "hidden",
+              }}>
+                <div style={{
+                  display: "flex", justifyContent: "center", marginBottom: 28,
+                }}>
+                  <div style={{
+                    padding: "10px 18px", borderRadius: 999,
+                    background: "var(--marg-ink)", color: "#fff",
+                    fontSize: 12, fontWeight: 700, letterSpacing: ".08em",
+                  }}>START YOUR JOURNEY</div>
+                </div>
 
-                const active =
-                  step.status === "in_progress" ||
-                  step.status === "active";
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 230px), 1fr))",
+                  gap: "30px 22px",
+                  alignItems: "stretch",
+                }}>
+                  {steps.map((step, index) => {
+                    const completed = step.status === "completed";
+                    const isFirstIncomplete = index === firstIncompleteIndex;
+                    const active = !completed && isFirstIncomplete;
+                    const locked = !completed && !active;
+                    const conceptId = step.concept_id ?? step.conceptId;
+                    const stepId = step.step_id ?? step.stepId;
+                    const canNavigate = !locked && Boolean(conceptId && stepId);
 
-                const locked =
-                  !completed &&
-                  !active &&
-                  index >
-                    steps.findIndex(
-                      (item) =>
-                        item.status ===
-                          "in_progress" ||
-                        item.status === "active"
-                    );
-
-                return (
-                  <div
-                    key={step.step_id}
-                    className="marg-path-step"
-                  >
-                    <div
-                      className={`marg-path-number ${
-                        active
-                          ? "marg-path-number-active"
-                          : ""
-                      }`}
-                      style={{
-                        background: completed
-                          ? "var(--marg-ink)"
-                          : active
-                            ? "var(--marg-orange)"
-                            : "var(--marg-canvas)",
-                        borderColor:
-                          completed ||
-                          active
-                            ? completed
-                              ? "var(--marg-ink)"
-                              : "var(--marg-orange)"
-                            : "var(--marg-border-strong)",
-                        color:
-                          completed || active
-                            ? "#ffffff"
-                            : "var(--marg-ink)",
-                      }}
-                    >
-                      {completed
-                        ? "✓"
-                        : String(index + 1).padStart(
-                            2,
-                            "0"
-                          )}
-                    </div>
-
-                    <div className="marg-path-content">
-                      <div
+                    return (
+                      <article
+                        key={step.step_id ?? step.stepId ?? `${conceptId}-${index}`}
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent:
-                            "space-between",
-                          gap: 16,
+                          position: "relative",
+                          minWidth: 0,
+                          border: `1px solid ${active ? "var(--marg-orange)" : completed ? "var(--marg-ink)" : "var(--marg-border-strong)"}`,
+                          borderRadius: 16,
+                          padding: 18,
+                          background: completed
+                            ? "var(--marg-ink)"
+                            : active
+                              ? "var(--marg-canvas)"
+                              : "var(--marg-card, var(--marg-canvas))",
+                          color: completed ? "#fff" : "var(--marg-ink)",
+                          opacity: locked ? 0.72 : 1,
+                          boxShadow: active ? "0 0 0 3px rgba(231, 57, 22, 0.10)" : "none",
                         }}
                       >
-                        <div
-                          className="marg-path-title"
-                          style={{
-                            color: locked
-                              ? "var(--marg-ash)"
-                              : "var(--marg-ink)",
-                          }}
-                        >
-                          {step.concept_label}
+                        <div style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                          marginBottom: 14,
+                        }}>
+                          <div style={{
+                            width: 38, height: 38, flexShrink: 0, borderRadius: "50%",
+                            display: "grid", placeItems: "center",
+                            border: `1px solid ${completed ? "rgba(255,255,255,.5)" : active ? "var(--marg-orange)" : "var(--marg-border-strong)"}`,
+                            background: active ? "var(--marg-orange)" : "transparent",
+                            color: active ? "#fff" : completed ? "#fff" : "var(--marg-ink)",
+                            fontSize: 12, fontWeight: 700,
+                          }}>
+                            {completed ? "✓" : locked ? "🔒" : String(index + 1).padStart(2, "0")}
+                          </div>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, letterSpacing: ".08em",
+                            color: completed ? "#d7f7df" : active ? "var(--marg-orange)" : "var(--marg-muted)",
+                          }}>
+                            {completed ? "COMPLETED" : active ? "AVAILABLE NOW" : "LOCKED"}
+                          </span>
                         </div>
+
+                        <h3 style={{
+                          fontSize: 17, lineHeight: 1.4, fontWeight: 650,
+                          overflowWrap: "anywhere",
+                        }}>{step.concept_label ?? step.conceptLabel ?? "Untitled concept"}</h3>
+
+                        {step.reason && step.reason !== "syllabus_concept" && (
+                          <p style={{
+                            marginTop: 8, fontSize: 12, lineHeight: 1.5,
+                            color: completed ? "rgba(255,255,255,.75)" : "var(--marg-muted)",
+                          }}>
+                            {step.reason === "quick_revision"
+                              ? "Quick revision"
+                              : step.reason === "missing_prerequisite"
+                                ? "Prerequisite concept"
+                                : step.reason}
+                          </p>
+                        )}
+
+                        {canNavigate && !completed && (
+                          <a
+                            href={`/learn/teach/${encodeURIComponent(conceptId)}?stepId=${encodeURIComponent(stepId)}`}
+                            className={`marg-btn ${active ? "marg-btn-primary" : "marg-btn-outline"}`}
+                            style={{ marginTop: 16, width: "100%", minHeight: 40, fontSize: 12, justifyContent: "center" }}
+                          >
+                            {step.status === "in_progress" || step.status === "active" ? "Continue learning →" : "Start learning →"}
+                          </a>
+                        )}
+
+                        {locked && !completed && (
+                          <div style={{ marginTop: 16, fontSize: 12, color: "var(--marg-muted)" }}>
+                            Complete the earlier step to unlock this concept.
+                          </div>
+                        )}
 
                         {completed && (
-                          <span className="marg-tag marg-tag-success">
-                            COMPLETED
-                          </span>
+                          <div style={{ marginTop: 14, fontSize: 12, color: "rgba(255,255,255,.75)" }}>
+                            Mastery recorded
+                          </div>
                         )}
-
-                        {active && (
-                          <span className="marg-tag marg-tag-orange">
-                            CURRENT
-                          </span>
-                        )}
-                      </div>
-
-                      {step.reason && (
-                        <div className="marg-path-description">
-                          {step.reason}
-                        </div>
-                      )}
-
-                      {!locked && !completed && (
-                        <a
-                          href={`/learn/teach/${step.concept_id}?stepId=${step.step_id}`}
-                          className="marg-btn marg-btn-outline"
-                          style={{
-                            marginTop: 14,
-                            minHeight: 36,
-                            padding: "0 12px",
-                            fontSize: 12,
-                          }}
-                        >
-                          Learn this →
-                        </a>
-                      )}
-
-                      {completed && (
-                        <div
-                          style={{
-                            marginTop: 10,
-                            color: "var(--marg-muted)",
-                            fontSize: 12,
-                            fontFamily:
-                              "JetBrains Mono, monospace",
-                          }}
-                        >
-                          Mastery recorded
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </section>
 
           {/* Bottom navigation */}
@@ -476,9 +458,9 @@ export default function LearningPathPage({ params }) {
               ← New learning path
             </a>
 
-            {currentStep && (
+            {currentStep && (currentStep.concept_id ?? currentStep.conceptId) && (currentStep.step_id ?? currentStep.stepId) && (
               <a
-                href={`/learn/teach/${currentStep.concept_id}?stepId=${currentStep.step_id}`}
+                href={`/learn/teach/${encodeURIComponent(currentStep.concept_id ?? currentStep.conceptId)}?stepId=${encodeURIComponent(currentStep.step_id ?? currentStep.stepId)}`}
                 className="marg-btn marg-btn-primary"
               >
                 Continue →

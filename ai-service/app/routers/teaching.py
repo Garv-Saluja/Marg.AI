@@ -1,41 +1,59 @@
+
 """
 Step 7: AI Teaching Module.
 
-Design: one LLM call per explanation request, with a system prompt built from:
-  - the concept's label + (later) a short curated description from Neo4j/resources
-  - the requested explanation mode (simple/detailed/example/step_by_step/exam_oriented)
-  - the student's current mastery (adjusts vocabulary/depth — "beginner" framing
-    below ~40% mastery, more technical framing above)
+Provides:
+- POST /teach/explain
+- POST /teach/reteach
 
-RAG (retrieved course material / notes) is handled in rag.py — /teach/rag-answer
-is for doubt-support specifically. /teach/explain below is intentionally a
-plain LLM call for the *first* explanation of a concept (no student question
-to retrieve against yet); once resources are uploaded, swap this to also pull
-top-k chunks the same way rag.py does before generating.
+Teaching responses are plain text, so JSON response mode is disabled.
 """
+
+import logging
+from typing import Literal, Optional
+
 from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import Optional, Literal
+from pydantic import BaseModel, Field
 
 from app.llm_client import llm
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/teach", tags=["teach"])
 
+
 EXPLANATION_MODE_INSTRUCTIONS = {
-    "simple": "Explain this as simply as possible, avoiding jargon, using a short analogy.",
-    "detailed": "Give a thorough, technically precise explanation suitable for exam preparation.",
-    "example": "Skip the theory and go straight to 2-3 worked examples of increasing difficulty.",
-    "step_by_step": "Break this into small numbered steps, each building on the last.",
-    "exam_oriented": "Explain this the way a topper would answer it in a university exam, "
-    "including the standard structure examiners expect.",
+    "simple": (
+        "Explain simply, avoid jargon, and use one relatable analogy."
+    ),
+    "detailed": (
+        "Give a thorough, technically accurate explanation suitable "
+        "for university exam preparation."
+    ),
+    "example": (
+        "Focus on two concrete worked examples, explaining each step."
+    ),
+    "step_by_step": (
+        "Explain the concept in clear, numbered steps."
+    ),
+    "exam_oriented": (
+        "Give an exam-oriented explanation with a definition, key points, "
+        "an example, and a short conclusion."
+    ),
 }
 
 
 class ExplainRequest(BaseModel):
     userId: str
     conceptId: str
-    explanationMode: Literal["simple", "detailed", "example", "step_by_step", "exam_oriented"] = "simple"
-    currentMastery: float = 0
+    explanationMode: Literal[
+        "simple",
+        "detailed",
+        "example",
+        "step_by_step",
+        "exam_oriented",
+    ] = "simple"
+    currentMastery: float = Field(default=0, ge=0, le=100)
 
 
 class ExplainResponse(BaseModel):
@@ -46,20 +64,38 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 def explain_concept(req: ExplainRequest):
-    level_hint = "The student is a beginner on this concept." if req.currentMastery < 40 else (
-        "The student has partial understanding; build on that rather than starting from zero."
-    )
-    system = (
-        "You are an expert, encouraging computer science tutor for a B.Tech student. "
-        f"{EXPLANATION_MODE_INSTRUCTIONS[req.explanationMode]} {level_hint}"
-    )
-    # TODO: replace the bare concept id with its human label + any curated
-    # description/resources once those are wired up (Neo4j Concept.description,
-    # or a resource lookup by concept_id).
-    user = f"Explain the concept: {req.conceptId}"
+    if req.currentMastery < 40:
+        level_hint = (
+            "The student is a beginner. Start with the fundamentals "
+            "and define unfamiliar terms."
+        )
+    else:
+        level_hint = (
+            "The student has some understanding. Build on the fundamentals "
+            "and introduce appropriate technical detail."
+        )
 
-    text = llm.complete(system=system, user=user, max_tokens=700)
-    return ExplainResponse(text=text, conceptId=req.conceptId, explanationMode=req.explanationMode)
+    system = (
+        "You are an expert, encouraging computer science tutor for a "
+        "B.Tech student. Return a natural-language explanation, not JSON. "
+        f"{EXPLANATION_MODE_INSTRUCTIONS[req.explanationMode]} "
+        f"{level_hint} Keep the explanation focused and useful."
+    )
+
+    user = f"Explain this computer science concept: {req.conceptId}"
+
+    text = llm.complete(
+        system=system,
+        user=user,
+        max_tokens=1000,
+        response_format=None,
+    )
+
+    return ExplainResponse(
+        text=text,
+        conceptId=req.conceptId,
+        explanationMode=req.explanationMode,
+    )
 
 
 class ReteachRequest(BaseModel):
@@ -75,17 +111,27 @@ class ReteachResponse(BaseModel):
 
 @router.post("/reteach", response_model=ReteachResponse)
 def reteach(req: ReteachRequest):
-    """Step 7-I: Re-teaching. Deliberately does NOT reuse the same explanation —
-    the system prompt instructs the LLM to take a different angle."""
     system = (
-        "You are a patient CS tutor. The student was already taught this concept once and "
-        "still struggled. Do NOT repeat a similar explanation — use a different analogy, a "
-        "simpler concrete example, and explicitly address the likely misconception."
+        "You are a patient computer science tutor. The student struggled "
+        "with this concept previously. Explain it using a different, simple "
+        "analogy and one concrete example. Directly address the likely "
+        "misconception. Return natural-language text, not JSON. "
+        "Be concise: use at most five short paragraphs. "
+        "Avoid repeating the same explanation."
     )
+
     user = (
         f"Concept: {req.conceptId}\n"
         f"Weak sub-concept: {req.weakSubConceptId or 'unspecified'}\n"
-        f"Summary of the student's last attempt/mistakes: {req.lastAttemptSummary or 'not provided'}"
+        "Student's previous difficulty: "
+        f"{req.lastAttemptSummary or 'not provided'}"
     )
-    text = llm.complete(system=system, user=user, max_tokens=700)
+
+    text = llm.complete(
+        system=system,
+        user=user,
+        max_tokens=1000,
+        response_format=None,
+    )
+
     return ReteachResponse(text=text)

@@ -225,4 +225,4 @@ def test_api_returns_complete_recommendation_response(monkeypatch):
             },
         ]
     }
-    
+        

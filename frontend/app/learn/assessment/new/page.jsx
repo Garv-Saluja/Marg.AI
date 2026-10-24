@@ -1,18 +1,18 @@
+
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { assessmentApi } from "../../../../lib/api";
+import { assessmentApi, learningPathApi } from "../../../../lib/api";
 import NavBar from "../../../../components/NavBar";
 
 function AssessmentContent() {
   const params = useSearchParams();
-
   const conceptId = params.get("conceptId");
   const subjectId = params.get("subjectId");
   const assessmentType = params.get("type") || "diagnostic";
-
-  const isFullSyllabus = !!subjectId && !conceptId;
+  const stepId = params.get("stepId");
+  const isFullSyllabus = Boolean(subjectId && !conceptId);
 
   const [assessment, setAssessment] = useState(null);
   const [questions, setQuestions] = useState([]);
@@ -22,9 +22,19 @@ function AssessmentContent() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [progressError, setProgressError] = useState("");
+  const [updatingProgress, setUpdatingProgress] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function startAssessment() {
+      if (!conceptId && !subjectId) {
+        setError("No concept or subject was provided for this assessment.");
+        setLoading(false);
+        return;
+      }
+
       try {
         setLoading(true);
         setError("");
@@ -38,34 +48,65 @@ function AssessmentContent() {
           payload.subjectId = subjectId;
         } else {
           payload.targetConceptId = conceptId;
-          payload.conceptIds = conceptId ? [conceptId] : [];
+          payload.conceptIds = [conceptId];
         }
 
         const response = await assessmentApi.start(payload);
 
+        if (cancelled) return;
+
         setAssessment(response.assessment);
-        setQuestions(response.questions || []);
-      } catch (err) {
-        setError(
-          "We couldn't prepare your assessment. Please try again."
+        setQuestions(
+          Array.isArray(response.questions) ? response.questions : []
         );
+
+        if (!response.assessment) {
+          setError("The server did not return an assessment.");
+        }
+      } catch (err) {
+        console.error(
+          "Assessment start failed:",
+          err?.response?.data || err
+        );
+
+        if (!cancelled) {
+          setError(
+            err?.response?.data?.detail ||
+              err?.response?.data?.error ||
+              err?.message ||
+              "We couldn't prepare your assessment. Please try again."
+          );
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
-    if (conceptId || subjectId) {
-      startAssessment();
-    } else {
-      setLoading(false);
-      setError("No concept or subject was provided for this assessment.");
-    }
+    startAssessment();
+
+    return () => {
+      cancelled = true;
+    };
   }, [conceptId, subjectId, assessmentType, isFullSyllabus]);
+
+  const conceptName = conceptId
+    ? decodeURIComponent(conceptId)
+        .replace(/[._-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\bdbms\b/gi, "DBMS")
+        .replace(/\b\w/g, (char) => char.toUpperCase())
+    : "Full Syllabus";
 
   async function submitAnswer() {
     const question = questions[current];
 
-    if (!question || selected == null || !assessment || submitting) {
+    if (
+      !question ||
+      selected == null ||
+      !assessment ||
+      submitting
+    ) {
       return;
     }
 
@@ -84,45 +125,99 @@ function AssessmentContent() {
       } else {
         const completion = await assessmentApi.complete(
           assessment.assessment_id,
-          {
-            reason: assessmentType,
-          }
+          { reason: assessmentType }
         );
 
-        setResult(completion.conceptScores || []);
+        const conceptScores = completion.conceptScores || [];
+        setResult(conceptScores);
+
+        if (stepId) {
+          const mastered =
+            conceptScores.length > 0 &&
+            conceptScores.every((concept) => concept.status === "mastered");
+
+          try {
+            setUpdatingProgress(true);
+            await learningPathApi.updateStep(
+              stepId,
+              mastered ? "completed" : "in_progress"
+            );
+            setProgressError("");
+          } catch (stepError) {
+            console.error(
+              "Assessment was saved, but the learning-path step could not be updated:",
+              stepError?.response?.data || stepError
+            );
+            setProgressError(
+              stepError?.response?.data?.error ||
+                stepError?.response?.data?.detail ||
+                "Your assessment was saved, but learning-path progress could not be updated. Retry the progress update."
+            );
+          } finally {
+            setUpdatingProgress(false);
+          }
+        }
       }
     } catch (err) {
-      setError("We couldn't submit your answer. Please try again.");
+      console.error(
+        "Assessment submission failed:",
+        err?.response?.data || err
+      );
+
+      setError(
+        err?.response?.data?.detail ||
+          err?.response?.data?.error ||
+          err?.message ||
+          "We couldn't submit your answer. Please try again."
+      );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function retryProgressUpdate() {
+    if (!stepId || !Array.isArray(result) || updatingProgress) return;
+
+    const mastered =
+      result.length > 0 &&
+      result.every((concept) => concept.status === "mastered");
+
+    setUpdatingProgress(true);
+    setProgressError("");
+    try {
+      await learningPathApi.updateStep(
+        stepId,
+        mastered ? "completed" : "in_progress"
+      );
+    } catch (stepError) {
+      console.error("Learning-path progress retry failed:", stepError);
+      setProgressError(
+        stepError?.response?.data?.error ||
+          stepError?.response?.data?.detail ||
+          "Progress update failed again. Check your connection and retry."
+      );
+    } finally {
+      setUpdatingProgress(false);
     }
   }
 
   const assessmentTitle =
     assessmentType === "diagnostic"
       ? "Diagnostic Assessment"
+      : assessmentType === "post_teaching"
+      ? "Post-Teaching Assessment"
       : "Reassessment";
-
-  const conceptName = conceptId
-    ? conceptId
-        .replace(/[_-]/g, " ")
-        .replace(/\b\w/g, (char) => char.toUpperCase())
-    : "Full Syllabus";
 
   if (loading) {
     return (
       <>
         <NavBar />
-
         <main className="marg-container marg-page">
           <div className="marg-assessment-loading">
             <div className="marg-eyebrow">ASSESSMENT</div>
-
             <h1>Preparing your assessment...</h1>
-
             <div className="marg-loading-line" />
             <div className="marg-loading-line short" />
-
             <p>
               Marg.ai is preparing questions based on your learning profile.
             </p>
@@ -136,16 +231,25 @@ function AssessmentContent() {
     return (
       <>
         <NavBar />
-
         <main className="marg-container marg-page">
           <div className="marg-empty-state">
             <div className="marg-card-kicker">ASSESSMENT</div>
-
             <h1>Something went wrong.</h1>
-
             <p>{error}</p>
 
-            <a href="/learn/mode" className="marg-btn marg-btn-dark">
+            <button
+              type="button"
+              className="marg-btn marg-btn-primary"
+              onClick={() => window.location.reload()}
+            >
+              Try again
+            </button>
+
+            <a
+              href="/learn/mode"
+              className="marg-btn marg-btn-dark"
+              style={{ marginLeft: 10 }}
+            >
               Back to learning →
             </a>
           </div>
@@ -162,7 +266,6 @@ function AssessmentContent() {
     return (
       <>
         <NavBar />
-
         <main className="marg-container marg-page">
           <div className="marg-result-layout">
             <section className="marg-result-main">
@@ -180,6 +283,21 @@ function AssessmentContent() {
                 Your understanding of{" "}
                 <strong>{conceptName}</strong> has been reassessed.
               </p>
+
+              {progressError && (
+                <div className="marg-alert marg-alert-error" role="alert">
+                  <p>{progressError}</p>
+                  <button
+                    type="button"
+                    className="marg-btn marg-btn-primary"
+                    onClick={retryProgressUpdate}
+                    disabled={updatingProgress}
+                    style={{ marginTop: 12 }}
+                  >
+                    {updatingProgress ? "Updating progress..." : "Retry progress update"}
+                  </button>
+                </div>
+              )}
 
               <div className="marg-score-list">
                 {result.map((concept) => (
@@ -210,7 +328,7 @@ function AssessmentContent() {
                 ) : (
                   <>
                     <a
-                      href={`/learn/teach/${conceptId}`}
+                      href={`/learn/teach/${encodeURIComponent(conceptId || "")}`}
                       className="marg-btn marg-btn-primary"
                     >
                       Re-teach this concept →
@@ -228,9 +346,7 @@ function AssessmentContent() {
             </section>
 
             <aside className="marg-result-sidebar">
-              <div className="marg-card-kicker">
-                YOUR RESULT
-              </div>
+              <div className="marg-card-kicker">YOUR RESULT</div>
 
               <div className="marg-result-status">
                 {mastered ? "Mastered" : "Keep learning"}
@@ -254,18 +370,14 @@ function AssessmentContent() {
     return (
       <>
         <NavBar />
-
         <main className="marg-container marg-page">
           <div className="marg-empty-state">
             <div className="marg-card-kicker">ASSESSMENT</div>
-
             <h1>No questions available.</h1>
-
             <p>
               There aren't any assessment questions available for this
               learning path yet.
             </p>
-
             <a href="/dashboard" className="marg-btn marg-btn-dark">
               Back to dashboard →
             </a>
@@ -290,15 +402,11 @@ function AssessmentContent() {
             </div>
 
             <h1>{assessmentTitle}</h1>
-
             <p>{conceptName}</p>
           </div>
 
           <div className="marg-assessment-count">
-            <strong>
-              {String(current + 1).padStart(2, "0")}
-            </strong>
-
+            <strong>{String(current + 1).padStart(2, "0")}</strong>
             <span>
               / {String(questions.length).padStart(2, "0")}
             </span>
@@ -322,7 +430,6 @@ function AssessmentContent() {
           <section className="marg-assessment-card">
             <div className="marg-assessment-card-header">
               <span>QUESTION {current + 1}</span>
-
               <span>{Math.round(progress)}% COMPLETE</span>
             </div>
 
@@ -339,6 +446,7 @@ function AssessmentContent() {
                     }`}
                     onClick={() => setSelected(option.id)}
                     disabled={submitting}
+                    aria-pressed={selected === option.id}
                   >
                     <span className="marg-option-letter">
                       {String.fromCharCode(65 + index)}
@@ -347,9 +455,7 @@ function AssessmentContent() {
                     <span>{option.text}</span>
 
                     {selected === option.id && (
-                      <span className="marg-selected-mark">
-                        ✓
-                      </span>
+                      <span className="marg-selected-mark">✓</span>
                     )}
                   </button>
                 ))}
@@ -357,9 +463,7 @@ function AssessmentContent() {
             </div>
 
             <div className="marg-assessment-footer">
-              <span>
-                Choose the answer you think is correct.
-              </span>
+              <span>Choose the answer you think is correct.</span>
 
               <button
                 type="button"
@@ -399,23 +503,17 @@ function AssessmentContent() {
 
               <div className="marg-sidebar-row">
                 <span>Scope</span>
-
                 <strong>
-                  {isFullSyllabus
-                    ? "Full syllabus"
-                    : "Single topic"}
+                  {isFullSyllabus ? "Full syllabus" : "Single topic"}
                 </strong>
               </div>
             </div>
 
             <div className="marg-assessment-note">
-              <div className="marg-card-kicker">
-                WHY THIS MATTERS
-              </div>
-
+              <div className="marg-card-kicker">WHY THIS MATTERS</div>
               <p>
-                Your answers help Marg.ai understand your current
-                mastery and determine what you should learn next.
+                Your answers help Marg.ai understand your current mastery and
+                determine what you should learn next.
               </p>
             </div>
           </aside>
@@ -431,13 +529,9 @@ export default function AssessmentPage() {
       fallback={
         <>
           <NavBar />
-
           <main className="marg-container marg-page">
             <div className="marg-assessment-loading">
-              <div className="marg-card-kicker">
-                ASSESSMENT
-              </div>
-
+              <div className="marg-card-kicker">ASSESSMENT</div>
               <h1>Loading assessment...</h1>
             </div>
           </main>

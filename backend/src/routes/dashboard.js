@@ -34,19 +34,47 @@ dashboardRouter.get("/knowledge-profile", async (req, res) => {
 });
 
 // Current learning: active learning path + current step
+
+ // Current learning: return all saved learning paths and their steps
 dashboardRouter.get("/current-learning", async (req, res) => {
-  const { userId } = req.user;
-  const path = await query(
-    `SELECT * FROM learning_paths WHERE user_id = $1 AND status = 'active'
-     ORDER BY created_at DESC LIMIT 1`,
-    [userId]
-  );
-  if (path.rowCount === 0) return res.json({ activePath: null });
-  const steps = await query(
-    `SELECT * FROM learning_path_steps WHERE learning_path_id = $1 ORDER BY order_index`,
-    [path.rows[0].learning_path_id]
-  );
-  res.json({ activePath: path.rows[0], steps: steps.rows });
+  try {
+    const { userId } = req.user;
+
+    // Fetch all paths belonging to this user, not just the newest active path.
+    const pathsResult = await query(
+      `SELECT *
+       FROM learning_paths
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    // Fetch the steps belonging to each path.
+    const learningPaths = await Promise.all(
+      pathsResult.rows.map(async (path) => {
+        const stepsResult = await query(
+          `SELECT *
+           FROM learning_path_steps
+           WHERE learning_path_id = $1
+           ORDER BY order_index`,
+          [path.learning_path_id]
+        );
+
+        return {
+          ...path,
+          steps: stepsResult.rows,
+        };
+      })
+    );
+
+    res.json({ learningPaths });
+  } catch (error) {
+    console.error("Failed to fetch learning paths:", error);
+
+    res.status(500).json({
+      error: "Failed to fetch learning paths",
+    });
+  }
 });
 
 // Assessment history

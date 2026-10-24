@@ -109,5 +109,10 @@ def rag_answer(req: RagRequest):
     )
     user = f"Context:\n{context}\n\nStudent's question about {req.conceptId}: {req.question}"
 
-    text = llm.complete(system=system, user=user, max_tokens=600)
+    text = llm.complete(
+    system=system,
+    user=user,
+    max_tokens=1000,
+    response_format=None,
+    )
     return RagResponse(text=text, sources=retrieved)

@@ -127,9 +127,9 @@ export default function TopicSelectPage() {
                     lineHeight: 1.6,
                   }}
                 >
-                  Enter the concept ID you want to learn.
-                  Marg.ai will use the knowledge graph to build
-                  the path around it.
+                  Enter the topic you want to learn.
+                  Marg.ai will resolve the topic and generate a
+                  personalized learning path with its prerequisites.
                 </p>
 
                 <div style={{ marginTop: 32 }}>
@@ -137,7 +137,7 @@ export default function TopicSelectPage() {
                     htmlFor="conceptId"
                     className="marg-label"
                   >
-                    Concept ID
+                    Topic name
                   </label>
 
                   <input
@@ -147,7 +147,7 @@ export default function TopicSelectPage() {
                     onChange={(e) =>
                       setConceptId(e.target.value)
                     }
-                    placeholder="e.g. dbms.normalization"
+                    placeholder="e.g. Binary Search"
                     disabled={loading}
                     required
                   />

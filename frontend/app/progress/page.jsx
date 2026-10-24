@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -7,26 +8,40 @@ import NavBar from "../../components/NavBar";
 export default function ProgressPage() {
   const [history, setHistory] = useState([]);
   const [assessments, setAssessments] = useState([]);
+  const [knowledgeProfile, setKnowledgeProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function loadProgress() {
       try {
-        const [historyResult, assessmentResult] = await Promise.all([
-          dashboardApi.progress(),
-          dashboardApi.assessments(),
-        ]);
+        const [historyResult, assessmentResult, profileResult] =
+          await Promise.all([
+            dashboardApi.progress(),
+            dashboardApi.assessments(),
+            dashboardApi.knowledgeProfile(),
+          ]);
 
-        setHistory(historyResult || []);
-        setAssessments(assessmentResult || []);
+        if (!cancelled) {
+          setHistory(Array.isArray(historyResult) ? historyResult : []);
+          setAssessments(
+            Array.isArray(assessmentResult) ? assessmentResult : []
+          );
+          setKnowledgeProfile(profileResult || null);
+        }
       } catch (error) {
-        // Keep the page usable even if one request fails.
+        console.error("Failed to load progress:", error);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
     loadProgress();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const byConcept = useMemo(() => {
@@ -44,17 +59,24 @@ export default function ProgressPage() {
 
   const conceptStats = useMemo(() => {
     return Object.entries(byConcept).map(([conceptId, rows]) => {
-      const latest = rows[rows.length - 1];
-      const first = rows[0];
+      const sortedRows = [...rows].sort(
+        (a, b) =>
+          new Date(a.recorded_at || 0).getTime() -
+          new Date(b.recorded_at || 0).getTime()
+      );
+
+      const latest = sortedRows[sortedRows.length - 1];
+      const first = sortedRows[0];
+
+      const latestScore = Number(latest?.mastery_score || 0);
+      const firstScore = Number(first?.mastery_score || 0);
 
       return {
         conceptId,
-        rows,
-        latestScore: Number(latest?.mastery_score || 0),
-        firstScore: Number(first?.mastery_score || 0),
-        change:
-          Number(latest?.mastery_score || 0) -
-          Number(first?.mastery_score || 0),
+        rows: sortedRows,
+        latestScore,
+        firstScore,
+        change: latestScore - firstScore,
       };
     });
   }, [byConcept]);
@@ -67,18 +89,11 @@ export default function ProgressPage() {
         )
       : 0;
 
-  const masteredCount = conceptStats.filter(
-    (item) => item.latestScore >= 80
+  const masteredCount = (knowledgeProfile?.all || []).filter(
+    (concept) => Number(concept.mastery_score) >= 75
   ).length;
 
   const assessmentCount = assessments.length;
-
-  function formatConcept(conceptId) {
-    return conceptId
-      .replace(/[_-]/g, " ")
-      .replace(/\./g, " ")
-      .replace(/\b\w/g, (char) => char.toUpperCase());
-  }
 
   function formatDate(date) {
     if (!date) return "—";
@@ -93,14 +108,16 @@ export default function ProgressPage() {
   }
 
   function formatType(value) {
-    return String(value || "")
-      .replace(/[_-]/g, " ")
+    return String(value || "Unknown")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
       .replace(/\b\w/g, (char) => char.toUpperCase());
   }
 
   function getScoreClass(score) {
-    if (score >= 80) return "strong";
-    if (score >= 50) return "developing";
+    if (score >= 75) return "strong";
+    if (score >= 40) return "developing";
     return "needs-work";
   }
 
@@ -108,7 +125,6 @@ export default function ProgressPage() {
     return (
       <>
         <NavBar />
-
         <main className="marg-container marg-page">
           <div className="marg-progress-loading">
             <div className="marg-eyebrow">PROGRESS</div>
@@ -136,11 +152,12 @@ export default function ProgressPage() {
             </p>
           </div>
 
-          <a href="/learn/mode" className="marg-btn marg-btn-primary">
+          <a href="/dashboard" className="marg-btn marg-btn-primary">
             Continue learning →
           </a>
         </header>
 
+        {/* Progress statistics */}
         <section className="marg-progress-stats">
           <div className="marg-progress-stat">
             <span>AVERAGE MASTERY</span>
@@ -163,6 +180,7 @@ export default function ProgressPage() {
           </div>
         </section>
 
+        {/* Mastery history */}
         <section className="marg-progress-section">
           <div className="marg-progress-section-header">
             <div>
@@ -184,10 +202,7 @@ export default function ProgressPage() {
                   Complete an assessment to start building your progress
                   history.
                 </p>
-                <a
-                  href="/learn/mode"
-                  className="marg-btn marg-btn-dark"
-                >
+                <a href="/learn/mode" className="marg-btn marg-btn-dark">
                   Start learning →
                 </a>
               </div>
@@ -202,10 +217,10 @@ export default function ProgressPage() {
                   <div className="marg-concept-progress-top">
                     <div>
                       <div className="marg-concept-id">
-                        {concept.conceptId}
+                        CONCEPT PROGRESS
                       </div>
 
-                      <h3>{formatConcept(concept.conceptId)}</h3>
+                      <h3>{formatConceptLabel(concept.conceptId)}</h3>
                     </div>
 
                     <div
@@ -231,7 +246,9 @@ export default function ProgressPage() {
                   <div className="marg-concept-progress-bottom">
                     <div className="marg-history-pills">
                       {concept.rows.map((row, index) => (
-                        <span key={`${row.concept_id}-${index}`}>
+                        <span
+                          key={`${row.concept_id}-${row.recorded_at || index}-${index}`}
+                        >
                           {formatType(row.reason)} · {row.mastery_score}%
                         </span>
                       ))}
@@ -239,11 +256,9 @@ export default function ProgressPage() {
 
                     {concept.change !== 0 && (
                       <span
-                        className={
-                          concept.change > 0
-                            ? "marg-progress-change positive"
-                            : "marg-progress-change negative"
-                        }
+                        className={`marg-progress-change ${
+                          concept.change > 0 ? "positive" : "negative"
+                        }`}
                       >
                         {concept.change > 0 ? "+" : ""}
                         {concept.change}% since first assessment
@@ -256,6 +271,7 @@ export default function ProgressPage() {
           )}
         </section>
 
+        {/* Assessment history */}
         <section className="marg-progress-section assessment-history-section">
           <div className="marg-progress-section-header">
             <div>
@@ -272,9 +288,7 @@ export default function ProgressPage() {
             <div className="marg-progress-empty compact">
               <div>
                 <h3>No assessments yet.</h3>
-                <p>
-                  Your completed assessments will appear here.
-                </p>
+                <p>Your completed assessments will appear here.</p>
               </div>
             </div>
           ) : (
@@ -303,8 +317,10 @@ export default function ProgressPage() {
 
                       <td>
                         {assessment.target_concept_id
-                          ? formatConcept(assessment.target_concept_id)
-                          : "Full syllabus"}
+                          ? formatConceptLabel(
+                              assessment.target_concept_id
+                            )
+                          : "Full Syllabus"}
                       </td>
 
                       <td>
@@ -330,4 +346,56 @@ export default function ProgressPage() {
       </main>
     </>
   );
+}
+
+function formatConceptLabel(label) {
+  if (!label) return "Unknown concept";
+
+  let value = String(label).trim();
+
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    // Keep the original value if it is not valid URL encoding.
+  }
+
+  // Strip generated prefix, e.g. generated.array_dbe42cc09c.
+  value = value.replace(/^generated[._\s-]+/i, "");
+
+  // Remove the trailing hash before replacing separators with spaces.
+  value = value.replace(/[._-]*[a-f0-9]{8,}$/i, "");
+
+  value = value
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!value) return "Unknown concept";
+
+  const specialLabels = {
+    os: "Operating System",
+    dbms: "DBMS",
+    dsa: "DSA",
+    cpu: "CPU",
+    sql: "SQL",
+    api: "API",
+    ai: "AI",
+  };
+
+  const words = value.split(" ");
+
+  if (words.length >= 2 && words[0].toLowerCase() === "os") {
+    return (
+      "Operating System: " +
+      words.slice(1).map(capitalizeWord).join(" ")
+    );
+  }
+
+  return words
+    .map((word) => specialLabels[word.toLowerCase()] || capitalizeWord(word))
+    .join(" ");
+}
+
+function capitalizeWord(word) {
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
 }
