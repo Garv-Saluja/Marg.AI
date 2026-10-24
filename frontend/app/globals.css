@@ -2443,3 +2443,98 @@ pre {
     padding: 0 11px;
   }
 }
+
+/* =========================================
+   Marg.ai — Teaching Markdown fixes
+   ========================================= */
+
+/* Normal document spacing inside rendered Markdown */
+.marg-markdown {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--marg-ink, #202020);
+  line-height: 1.6;
+}
+
+/* Keep generated paragraphs compact */
+.marg-markdown p {
+  white-space: normal;
+  margin: 0 0 10px;
+  line-height: 1.6;
+}
+
+/* Prevent tables from inheriting preserved whitespace */
+.marg-markdown .marg-md-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.marg-markdown .marg-md-table {
+  width: 100%;
+  table-layout: auto;
+  border-collapse: collapse;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.marg-markdown .marg-md-table th,
+.marg-markdown .marg-md-table td {
+  height: auto;
+  padding: 10px;
+  vertical-align: top;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.marg-markdown .marg-md-table p {
+  margin: 0;
+  white-space: normal;
+}
+
+/* Make code blocks readable */
+.marg-markdown pre.marg-md-pre {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 16px;
+  margin: 12px 0;
+  border-radius: 8px;
+  background: #202020 !important;
+  color: #f7f7f7 !important;
+  white-space: pre;
+  line-height: 1.6;
+}
+
+.marg-markdown pre.marg-md-pre code {
+  display: block;
+  padding: 0;
+  margin: 0;
+  background: transparent !important;
+  color: #f7f7f7 !important;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  white-space: inherit;
+}
+
+/* Preserve normal inline-code styling */
+.marg-markdown code.marg-md-inline-code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--marg-bone, #f3f0e8);
+  color: #202020;
+  font-size: 0.9em;
+}
+
+/* Responsive tables and code */
+@media (max-width: 640px) {
+  .marg-markdown .marg-md-table {
+    font-size: 12px;
+  }
+
+  .marg-markdown pre.marg-md-pre {
+    padding: 12px;
+  }
+}

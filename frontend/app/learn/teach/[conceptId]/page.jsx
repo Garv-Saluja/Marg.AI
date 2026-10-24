@@ -408,69 +408,92 @@ export default function TeachingPage({ params }) {
     margin: 10px 0 !important;
   }
 
-  /* Tables */
+  /* Tables: content-driven sizing, compact rows, horizontal scroll when needed */
   .marg-markdown .marg-md-table-wrap {
+    display: block;
     width: 100%;
     max-width: 100%;
     overflow-x: auto;
-    margin: 8px 0 12px !important;
+    margin: 10px 0 14px !important;
     -webkit-overflow-scrolling: touch;
   }
 
   .marg-markdown .marg-md-table {
     width: 100%;
-    table-layout: fixed;
+    min-width: 420px;
+    table-layout: auto;
     border-collapse: collapse;
     font-size: 13px;
-    line-height: 1.4;
+    line-height: 1.45;
   }
 
   .marg-markdown .marg-md-table th,
   .marg-markdown .marg-md-table td {
-    padding: 7px 9px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 9px 10px !important;
     border: 1px solid var(--marg-border, #dedbd5);
     text-align: left;
     vertical-align: top;
-    line-height: 1.4 !important;
+    line-height: 1.45 !important;
     overflow-wrap: anywhere;
     word-break: normal;
   }
 
-  /* Two-column tables: reserve more width for descriptions */
-  .marg-markdown .marg-md-table th:first-child,
-  .marg-markdown .marg-md-table td:first-child {
-    width: 32%;
-  }
-
-  .marg-markdown .marg-md-table th:nth-child(2),
-  .marg-markdown .marg-md-table td:nth-child(2) {
-    width: 68%;
-  }
-
   .marg-markdown .marg-md-table th {
     background: var(--marg-soft, #f3f0e9);
+    color: var(--marg-ink, #202020);
     font-weight: 700;
   }
 
   .marg-markdown .marg-md-table p {
     margin: 0 !important;
+    padding: 0 !important;
   }
 
-  /* Code */
+  .marg-markdown .marg-md-table tr {
+    height: auto !important;
+  }
+
+  /* Code blocks: force readable contrast even if global code styles exist */
+  .marg-markdown .marg-md-pre {
+    display: block;
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 12px 0 !important;
+    padding: 16px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #202020 !important;
+    color: #f7f7f7 !important;
+    line-height: 1.6;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  .marg-markdown .marg-md-pre code,
+  .marg-markdown .marg-md-pre code * {
+    display: inline;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    color: #f7f7f7 !important;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: inherit;
+    text-shadow: none !important;
+    white-space: inherit;
+  }
+
   .marg-markdown .marg-md-inline-code {
     padding: 0.12em 0.35em;
     border-radius: 4px;
     background: var(--marg-soft, #f3f0e9);
+    color: #202020;
     font-size: 0.9em;
-  }
-
-  .marg-markdown .marg-md-pre {
-    overflow-x: auto;
-    padding: 1rem;
-    border-radius: 8px;
-    background: #202020;
-    color: #f7f7f7;
-    line-height: 1.6;
+    overflow-wrap: anywhere;
   }
 
   .marg-markdown a {
@@ -490,12 +513,22 @@ export default function TeachingPage({ params }) {
     .marg-markdown .marg-md-h3 { font-size: 1rem; }
 
     .marg-markdown .marg-md-table {
+      min-width: 380px;
       font-size: 12px;
     }
 
     .marg-markdown .marg-md-table th,
     .marg-markdown .marg-md-table td {
-      padding: 6px !important;
+      padding: 7px !important;
+    }
+
+    .marg-markdown .marg-md-pre {
+      padding: 12px;
+    }
+
+    .marg-markdown .marg-md-pre code,
+    .marg-markdown .marg-md-pre code * {
+      font-size: 12px;
     }
   }
 `}</style>
