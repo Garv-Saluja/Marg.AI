@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useState } from "react";
@@ -81,17 +80,10 @@ export default function DashboardPage() {
       <NavBar />
 
       <main className="marg-dashboard-main">
-        {/* Header */}
         <header className="marg-page-header">
           <div>
-            <div className="marg-page-eyebrow">
-              MARG.AI / DASHBOARD
-            </div>
-
-            <h1 className="marg-page-title">
-              Your learning path.
-            </h1>
-
+            <div className="marg-page-eyebrow">MARG.AI / DASHBOARD</div>
+            <h1 className="marg-page-title">Your learning path.</h1>
             <p className="marg-page-description">
               See where you are, understand your knowledge gaps, and
               continue learning from where you left off.
@@ -103,7 +95,6 @@ export default function DashboardPage() {
           </a>
         </header>
 
-        {/* Overview */}
         <section style={{ marginTop: 40 }}>
           <div style={{ marginBottom: 16 }}>
             <div className="marg-page-eyebrow">OVERVIEW</div>
@@ -116,19 +107,16 @@ export default function DashboardPage() {
               value={getConceptCount(overview)}
               meta="Mapped concepts"
             />
-
             <StatCard
               label="Weak"
               value={weakConcepts.length}
               meta="Need attention"
             />
-
             <StatCard
               label="Strong"
               value={strongConcepts.length}
               meta="Mastered concepts"
             />
-
             <StatCard
               label="Path progress"
               value={`${progress}%`}
@@ -141,12 +129,10 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* All learning paths */}
         <section style={{ marginTop: 64 }}>
           <div style={{ marginBottom: 20 }}>
             <div className="marg-page-eyebrow">CONTINUE</div>
             <h2 style={{ fontSize: 36 }}>Current learning</h2>
-
             <p style={{ marginTop: 8, color: "var(--marg-muted)" }}>
               Continue your Full Syllabus or Single Topic learning path.
             </p>
@@ -298,6 +284,7 @@ export default function DashboardPage() {
                                       style={{
                                         fontSize: 14,
                                         fontWeight: 600,
+                                        overflowWrap: "anywhere",
                                       }}
                                     >
                                       {formatConceptLabel(
@@ -362,11 +349,9 @@ export default function DashboardPage() {
               <div className="marg-empty-title">
                 No learning paths found
               </div>
-
               <p className="marg-empty-description">
                 Start a full syllabus or select a single topic.
               </p>
-
               <a
                 href="/learn/mode"
                 className="marg-btn marg-btn-primary"
@@ -378,12 +363,10 @@ export default function DashboardPage() {
           )}
         </section>
 
-        {/* Knowledge Profile */}
         <section style={{ marginTop: 72 }}>
           <div style={{ marginBottom: 24 }}>
             <div className="marg-page-eyebrow">KNOWLEDGE PROFILE</div>
             <h2 style={{ fontSize: 36 }}>What you know.</h2>
-
             <p style={{ marginTop: 8, color: "var(--marg-muted)" }}>
               Your current understanding across mapped concepts.
             </p>
@@ -403,7 +386,6 @@ export default function DashboardPage() {
                   {weakConcepts.length}
                 </span>
               </div>
-
               <ConceptList
                 concepts={weakConcepts}
                 emptyMessage="No weak concepts detected yet."
@@ -424,7 +406,6 @@ export default function DashboardPage() {
                   {strongConcepts.length}
                 </span>
               </div>
-
               <ConceptList
                 concepts={strongConcepts}
                 emptyMessage="No strong concepts recorded yet."
@@ -433,7 +414,6 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* Bottom CTA */}
         <section
           style={{
             marginTop: 72,
@@ -454,7 +434,6 @@ export default function DashboardPage() {
               <div className="marg-page-eyebrow">KEEP GOING</div>
               <h3>Ready for the next concept?</h3>
             </div>
-
             <a href="/learn/mode" className="marg-btn marg-btn-primary">
               Learn something new
             </a>
@@ -518,7 +497,6 @@ function ConceptList({ concepts, emptyMessage, weak = false }) {
                   concept.concept_label || concept.concept_id
                 )}
               </span>
-
               <span
                 className="marg-mono"
                 style={{
@@ -553,23 +531,16 @@ function ConceptList({ concepts, emptyMessage, weak = false }) {
 function formatConceptLabel(label) {
   if (!label) return "Unknown concept";
 
-  let value = String(label).trim();
+  const value = String(label).trim();
 
-  try {
-    value = decodeURIComponent(value);
-  } catch {
-    // Keep the original label if it contains malformed URL encoding.
+  // Preserve human-readable labels exactly; only format machine-style IDs.
+  // This avoids truncating labels such as "Operating System Classification".
+  if (!/[._]/.test(value)) {
+    return value;
   }
 
-  value = value
-    .replace(/^generated[._-]+/i, "")
-    // Remove generated hash suffixes separated by spaces, dots, underscores,
-    // or hyphens. Accept alphanumeric hashes so labels like "Array Dbe42cc09c"
-    // are cleaned even if the suffix is not strictly hexadecimal.
-    .replace(/[\s._-]+[a-z0-9]{8,}$/i, "")
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const parts = value.split(/[._]+/).filter(Boolean);
+  if (!parts.length) return value;
 
   const specialLabels = {
     os: "Operating System",
@@ -581,16 +552,11 @@ function formatConceptLabel(label) {
     ai: "AI",
   };
 
-  const words = value.split(" ");
-
-  if (words.length >= 2 && words[0].toLowerCase() === "os") {
-    return (
-      "Operating System: " +
-      words.slice(1).map(capitalize).join(" ")
-    );
+  if (parts[0].toLowerCase() === "os" && parts.length > 1) {
+    return `Operating System: ${parts.slice(1).map(capitalize).join(" ")}`;
   }
 
-  return words
+  return parts
     .map((word) => specialLabels[word.toLowerCase()] || capitalize(word))
     .join(" ");
 }
