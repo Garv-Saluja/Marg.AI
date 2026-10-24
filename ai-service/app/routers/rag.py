@@ -1,14 +1,13 @@
 
-import gc
 import logging
 import os
 import time
-from functools import lru_cache
 from typing import List, Optional
 
 import psycopg
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sklearn.feature_extraction.text import HashingVectorizer
 
 from app.llm_client import llm
 
@@ -18,10 +17,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("margai.rag")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "mock").lower()
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
+
+# Lightweight, deterministic 384-dimensional vectors.
+# No PyTorch, model download, external embedding API, or API key required.
+_vectorizer = HashingVectorizer(
+    n_features=384,
+    alternate_sign=False,
+    norm="l2",
+    lowercase=True,
+    ngram_range=(1, 2),
+    dtype="float32",
 )
 
 
@@ -29,38 +35,10 @@ def log_stage(message: str):
     logger.info("[RAG] %s", message)
 
 
-@lru_cache(maxsize=1)
-def _model():
-    if EMBEDDING_PROVIDER != "local":
-        raise RuntimeError("Set EMBEDDING_PROVIDER=local")
-
-    log_stage(f"Loading embedding model: {EMBEDDING_MODEL}")
-    started = time.monotonic()
-
-    from sentence_transformers import SentenceTransformer
-
-    model = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
-
-    log_stage(
-        f"Embedding model loaded in {time.monotonic() - started:.2f}s"
-    )
-    return model
-
-
 def _embed(text: str) -> tuple:
-    """Generate one normalized 384-dimensional embedding."""
-    started = time.monotonic()
-    vector = _model().encode(
-        [text],
-        batch_size=1,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
-
-    result = tuple(float(value) for value in vector[0])
-    log_stage(f"Single embedding completed in {time.monotonic() - started:.2f}s")
-    return result
+    """Generate a deterministic 384-dimensional text vector."""
+    vector = _vectorizer.transform([text]).toarray()[0]
+    return tuple(float(value) for value in vector)
 
 
 def _vector_literal(text: str) -> str:
@@ -92,6 +70,7 @@ def _chunks(text: str, max_chars: int = 1600, overlap: int = 200):
                 text.rfind("\n", start, end),
                 text.rfind(". ", start, end),
             )
+
             if boundary > start + max_chars // 2:
                 end = boundary + 1
 
@@ -129,19 +108,13 @@ class RagResponse(BaseModel):
 
 @router.post("/index-syllabus")
 def index_syllabus(req: IndexSyllabusRequest):
-    """Index syllabus chunks in small batches, with diagnostic logging."""
-    request_started = time.monotonic()
+    """Replace syllabus chunks using lightweight incremental indexing."""
+    started = time.monotonic()
 
     log_stage(
         f"INDEX START syllabus={req.syllabusId} "
-        f"subject={req.subjectId} raw_chars={len(req.rawText)}"
+        f"subject={req.subjectId} chars={len(req.rawText)}"
     )
-
-    if EMBEDDING_PROVIDER != "local":
-        raise HTTPException(
-            status_code=503,
-            detail="Real embeddings are not enabled.",
-        )
 
     chunks = _chunks(req.rawText)
     log_stage(f"CHUNKING COMPLETE count={len(chunks)}")
@@ -149,17 +122,16 @@ def index_syllabus(req: IndexSyllabusRequest):
     if not chunks:
         raise HTTPException(status_code=400, detail="No text to index.")
 
-    batch_size = 2
+    batch_size = 4
     indexed_count = 0
 
     try:
-        # Keep deletion and all inserts in one transaction.
-        # If anything fails, the previous chunks are preserved by rollback.
         log_stage("DB CONNECT START")
 
+        # The context manager commits on success and rolls back on failure.
         with _db() as conn:
             with conn.cursor() as cur:
-                log_stage("DB CONNECTED; validating syllabus and subject")
+                log_stage("DB CONNECTED; validating syllabus")
 
                 cur.execute(
                     """
@@ -172,7 +144,6 @@ def index_syllabus(req: IndexSyllabusRequest):
                 )
 
                 if cur.fetchone() is None:
-                    log_stage("VALIDATION FAILED: syllabus/subject not found")
                     raise HTTPException(
                         status_code=404,
                         detail="Syllabus/subject pair was not found.",
@@ -188,33 +159,20 @@ def index_syllabus(req: IndexSyllabusRequest):
                     (req.syllabusId,),
                 )
 
-                log_stage(
-                    f"DELETE COMPLETE rows={cur.rowcount}; "
-                    f"embedding {len(chunks)} chunks"
-                )
-
                 for start in range(0, len(chunks), batch_size):
                     batch = chunks[start:start + batch_size]
                     batch_number = start // batch_size + 1
 
                     log_stage(
-                        f"BATCH {batch_number} START "
-                        f"chunks={start + 1}-{start + len(batch)}"
+                        f"BATCH {batch_number} START count={len(batch)}"
                     )
 
-                    # The model stays loaded, but only a small batch is encoded.
                     embed_started = time.monotonic()
-                    embeddings = _model().encode(
-                        batch,
-                        batch_size=1,
-                        normalize_embeddings=True,
-                        convert_to_numpy=True,
-                        show_progress_bar=False,
-                    )
+                    embeddings = [_embed(chunk) for chunk in batch]
 
                     log_stage(
                         f"BATCH {batch_number} EMBEDDING COMPLETE "
-                        f"seconds={time.monotonic() - embed_started:.2f}"
+                        f"seconds={time.monotonic() - embed_started:.3f}"
                     )
 
                     prepared = [
@@ -224,15 +182,13 @@ def index_syllabus(req: IndexSyllabusRequest):
                             start + offset,
                             content,
                             "[" + ",".join(
-                                str(float(value)) for value in embedding
+                                str(value) for value in embedding
                             ) + "]",
                             req.sourceFilename,
                         )
                         for offset, (content, embedding)
                         in enumerate(zip(batch, embeddings))
                     ]
-
-                    insert_started = time.monotonic()
 
                     cur.executemany(
                         """
@@ -250,17 +206,15 @@ def index_syllabus(req: IndexSyllabusRequest):
 
                     log_stage(
                         f"BATCH {batch_number} INSERT COMPLETE "
-                        f"count={len(prepared)} "
-                        f"seconds={time.monotonic() - insert_started:.2f}"
+                        f"total_indexed={indexed_count}"
                     )
 
                     del prepared, embeddings, batch
-                    gc.collect()
 
         log_stage(
             f"INDEX SUCCESS syllabus={req.syllabusId} "
             f"chunks={indexed_count} "
-            f"total_seconds={time.monotonic() - request_started:.2f}"
+            f"seconds={time.monotonic() - started:.3f}"
         )
 
         return {
@@ -276,7 +230,7 @@ def index_syllabus(req: IndexSyllabusRequest):
         logger.exception(
             "[RAG] INDEX FAILED syllabus=%s elapsed=%.2fs",
             req.syllabusId,
-            time.monotonic() - request_started,
+            time.monotonic() - started,
         )
         raise HTTPException(
             status_code=500,
@@ -289,10 +243,7 @@ def retrieve(
     subject_id: str,
     k: int = 4,
 ) -> List[dict]:
-    """Retrieve relevant chunks from the requested subject."""
-    if EMBEDDING_PROVIDER != "local":
-        raise RuntimeError("Set EMBEDDING_PROVIDER=local")
-
+    """Retrieve the closest indexed chunks for a subject."""
     if not subject_id:
         raise ValueError("subjectId is required")
 
@@ -313,6 +264,7 @@ def retrieve(
                 """,
                 (query_vector, subject_id, query_vector, k),
             )
+
             rows = cur.fetchall()
 
     log_stage(f"RETRIEVAL COMPLETE results={len(rows)}")

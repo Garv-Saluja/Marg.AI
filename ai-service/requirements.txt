@@ -8,7 +8,6 @@ numpy==1.26.4
 scikit-learn==1.5.0
 # sentence-transformers pulls in torch (~1-2GB). Comment out and use the `mock`
 # EMBEDDING_PROVIDER, or an API-based embedding provider, if you want a lighter build.
-sentence-transformers==3.0.1
 anthropic==0.28.1
 openai==1.35.0
 psycopg[binary]==3.2.9
