@@ -108,6 +108,7 @@ class RagResponse(BaseModel):
 
 @router.post("/index-syllabus")
 def index_syllabus(req: IndexSyllabusRequest):
+    print("INDEX_SYLLABUS_REACHED", flush=True)
     """Replace syllabus chunks using incremental embedding batches."""
     if EMBEDDING_PROVIDER != "local":
         raise HTTPException(

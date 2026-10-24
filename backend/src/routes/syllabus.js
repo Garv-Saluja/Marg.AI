@@ -202,25 +202,48 @@ router.post("/:syllabusId/process", requireAuth, async (req, res) => {
     }
 
     // NEW: Index the syllabus into persistent, subject-aware RAG storage.
-    const ragResult = await aiService.indexSyllabus({
-      syllabusId: syllabus.syllabus_id,
-      subjectId: syllabus.subject_id,
-      rawText: syllabus.raw_text,
-      sourceFilename: syllabus.original_filename,
-    });
+    
+console.log("[SYLLABUS] Calling AI index endpoint", {
+  syllabusId: syllabus.syllabus_id,
+  subjectId: syllabus.subject_id,
+  rawTextLength: syllabus.raw_text?.length ?? 0,
+});
 
-    if (
-      !Number.isInteger(ragResult?.chunksIndexed) ||
-      ragResult.chunksIndexed <= 0
-    ) {
-      console.error("Unexpected RAG indexing response:", ragResult);
+let ragResult;
 
-      return res.status(502).json({
-        message:
-          "Syllabus concepts were extracted, but RAG indexing did not complete.",
-      });
-    }
+try {
+  ragResult = await aiService.indexSyllabus({
+    syllabusId: syllabus.syllabus_id,
+    subjectId: syllabus.subject_id,
+    rawText: syllabus.raw_text,
+    sourceFilename: syllabus.original_filename,
+  });
 
+  console.log("[SYLLABUS] AI index endpoint returned", ragResult);
+} catch (error) {
+  console.error("[SYLLABUS] AI index request failed", {
+    message: error.message,
+    code: error.code,
+    status: error.response?.status,
+    response: error.response?.data,
+  });
+
+  throw error;
+}
+
+if (
+  !Number.isInteger(ragResult?.chunksIndexed) ||
+  ragResult.chunksIndexed <= 0
+) {
+  console.error("Unexpected RAG indexing response:", ragResult);
+
+  return res.status(502).json({
+    message:
+      "Syllabus concepts were extracted, but RAG indexing did not complete.",
+  });
+}
+
+    console.log("[SYLLABUS] AI index endpoint returned");
     let savedUnits = 0;
     let savedTopics = 0;
     let savedConcepts = 0;
