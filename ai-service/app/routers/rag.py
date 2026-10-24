@@ -1,6 +1,8 @@
 
 import gc
+import logging
 import os
+import time
 from functools import lru_cache
 from typing import List, Optional
 
@@ -12,6 +14,9 @@ from app.llm_client import llm
 
 router = APIRouter(prefix="/teach", tags=["teach"])
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("margai.rag")
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "mock").lower()
 EMBEDDING_MODEL = os.getenv(
@@ -19,19 +24,32 @@ EMBEDDING_MODEL = os.getenv(
     "sentence-transformers/all-MiniLM-L6-v2",
 )
 
-# Keep one model instance for the lifetime of the process.
+
+def log_stage(message: str):
+    logger.info("[RAG] %s", message)
+
+
 @lru_cache(maxsize=1)
 def _model():
     if EMBEDDING_PROVIDER != "local":
         raise RuntimeError("Set EMBEDDING_PROVIDER=local")
 
+    log_stage(f"Loading embedding model: {EMBEDDING_MODEL}")
+    started = time.monotonic()
+
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(EMBEDDING_MODEL, device="cpu")
+    model = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
+
+    log_stage(
+        f"Embedding model loaded in {time.monotonic() - started:.2f}s"
+    )
+    return model
 
 
-# Do not cache thousands of embeddings in RAM.
 def _embed(text: str) -> tuple:
+    """Generate one normalized 384-dimensional embedding."""
+    started = time.monotonic()
     vector = _model().encode(
         [text],
         batch_size=1,
@@ -39,7 +57,10 @@ def _embed(text: str) -> tuple:
         convert_to_numpy=True,
         show_progress_bar=False,
     )
-    return tuple(float(value) for value in vector[0])
+
+    result = tuple(float(value) for value in vector[0])
+    log_stage(f"Single embedding completed in {time.monotonic() - started:.2f}s")
+    return result
 
 
 def _vector_literal(text: str) -> str:
@@ -50,7 +71,7 @@ def _db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured for the AI service")
 
-    return psycopg.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL, connect_timeout=15)
 
 
 def _chunks(text: str, max_chars: int = 1600, overlap: int = 200):
@@ -108,8 +129,14 @@ class RagResponse(BaseModel):
 
 @router.post("/index-syllabus")
 def index_syllabus(req: IndexSyllabusRequest):
-    print("INDEX_SYLLABUS_REACHED", flush=True)
-    """Replace syllabus chunks using incremental embedding batches."""
+    """Index syllabus chunks in small batches, with diagnostic logging."""
+    request_started = time.monotonic()
+
+    log_stage(
+        f"INDEX START syllabus={req.syllabusId} "
+        f"subject={req.subjectId} raw_chars={len(req.rawText)}"
+    )
+
     if EMBEDDING_PROVIDER != "local":
         raise HTTPException(
             status_code=503,
@@ -117,17 +144,23 @@ def index_syllabus(req: IndexSyllabusRequest):
         )
 
     chunks = _chunks(req.rawText)
+    log_stage(f"CHUNKING COMPLETE count={len(chunks)}")
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text to index.")
 
-    batch_size = 4
+    batch_size = 2
     indexed_count = 0
 
     try:
-        # One transaction ensures a failed replacement is rolled back.
+        # Keep deletion and all inserts in one transaction.
+        # If anything fails, the previous chunks are preserved by rollback.
+        log_stage("DB CONNECT START")
+
         with _db() as conn:
             with conn.cursor() as cur:
+                log_stage("DB CONNECTED; validating syllabus and subject")
+
                 cur.execute(
                     """
                     SELECT 1
@@ -139,10 +172,13 @@ def index_syllabus(req: IndexSyllabusRequest):
                 )
 
                 if cur.fetchone() is None:
+                    log_stage("VALIDATION FAILED: syllabus/subject not found")
                     raise HTTPException(
                         status_code=404,
                         detail="Syllabus/subject pair was not found.",
                     )
+
+                log_stage("VALIDATION OK; deleting previous chunks")
 
                 cur.execute(
                     """
@@ -152,15 +188,33 @@ def index_syllabus(req: IndexSyllabusRequest):
                     (req.syllabusId,),
                 )
 
+                log_stage(
+                    f"DELETE COMPLETE rows={cur.rowcount}; "
+                    f"embedding {len(chunks)} chunks"
+                )
+
                 for start in range(0, len(chunks), batch_size):
                     batch = chunks[start:start + batch_size]
+                    batch_number = start // batch_size + 1
 
+                    log_stage(
+                        f"BATCH {batch_number} START "
+                        f"chunks={start + 1}-{start + len(batch)}"
+                    )
+
+                    # The model stays loaded, but only a small batch is encoded.
+                    embed_started = time.monotonic()
                     embeddings = _model().encode(
                         batch,
                         batch_size=1,
                         normalize_embeddings=True,
                         convert_to_numpy=True,
                         show_progress_bar=False,
+                    )
+
+                    log_stage(
+                        f"BATCH {batch_number} EMBEDDING COMPLETE "
+                        f"seconds={time.monotonic() - embed_started:.2f}"
                     )
 
                     prepared = [
@@ -178,6 +232,8 @@ def index_syllabus(req: IndexSyllabusRequest):
                         in enumerate(zip(batch, embeddings))
                     ]
 
+                    insert_started = time.monotonic()
+
                     cur.executemany(
                         """
                         INSERT INTO rag_chunks
@@ -192,8 +248,20 @@ def index_syllabus(req: IndexSyllabusRequest):
 
                     indexed_count += len(prepared)
 
+                    log_stage(
+                        f"BATCH {batch_number} INSERT COMPLETE "
+                        f"count={len(prepared)} "
+                        f"seconds={time.monotonic() - insert_started:.2f}"
+                    )
+
                     del prepared, embeddings, batch
                     gc.collect()
+
+        log_stage(
+            f"INDEX SUCCESS syllabus={req.syllabusId} "
+            f"chunks={indexed_count} "
+            f"total_seconds={time.monotonic() - request_started:.2f}"
+        )
 
         return {
             "message": "Syllabus indexed successfully.",
@@ -204,12 +272,16 @@ def index_syllabus(req: IndexSyllabusRequest):
 
     except HTTPException:
         raise
-    except Exception as exc:
-        print(f"RAG indexing error: {exc}")
+    except Exception:
+        logger.exception(
+            "[RAG] INDEX FAILED syllabus=%s elapsed=%.2fs",
+            req.syllabusId,
+            time.monotonic() - request_started,
+        )
         raise HTTPException(
             status_code=500,
             detail="Failed to index syllabus.",
-        ) from exc
+        )
 
 
 def retrieve(
@@ -224,6 +296,7 @@ def retrieve(
     if not subject_id:
         raise ValueError("subjectId is required")
 
+    log_stage("RETRIEVAL START")
     query_vector = _vector_literal(question)
 
     with _db() as conn:
@@ -241,6 +314,8 @@ def retrieve(
                 (query_vector, subject_id, query_vector, k),
             )
             rows = cur.fetchall()
+
+    log_stage(f"RETRIEVAL COMPLETE results={len(rows)}")
 
     return [
         {
@@ -262,12 +337,12 @@ def rag_answer(req: RagRequest):
             question=req.question,
             subject_id=req.subjectId,
         )
-    except Exception as exc:
-        print(f"RAG retrieval error: {exc}")
+    except Exception:
+        logger.exception("[RAG] RETRIEVAL FAILED")
         raise HTTPException(
             status_code=503,
             detail="RAG retrieval is unavailable.",
-        ) from exc
+        )
 
     context = "\n".join(
         f"- {item['text']} (source: {item['source']})"
@@ -297,11 +372,11 @@ def rag_answer(req: RagRequest):
             max_tokens=1000,
             response_format=None,
         )
-    except Exception as exc:
-        print(f"RAG LLM error: {exc}")
+    except Exception:
+        logger.exception("[RAG] LLM ANSWER FAILED")
         raise HTTPException(
             status_code=502,
             detail="Failed to generate the answer.",
-        ) from exc
+        )
 
     return RagResponse(text=answer, sources=retrieved)

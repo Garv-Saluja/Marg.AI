@@ -6,7 +6,7 @@ const AI_SERVICE_URL =
 
 const client = axios.create({
   baseURL: AI_SERVICE_URL,
-  timeout: 180000,
+  timeout: 300000,
 });
 
 export const aiService = {
