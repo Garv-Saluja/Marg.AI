@@ -5,19 +5,83 @@ import { requireAuth } from "../middleware/auth.js";
 import { aiService } from "../services/aiServiceClient.js";
 
 export const teachingRouter = Router();
+
 teachingRouter.use(requireAuth);
 
-// Explanation modes: simple|detailed|example|step_by_step|exam_oriented
-teachingRouter.post("/explain", async (req, res) => {
-  const userId =
+// Extract authenticated user ID.
+function getUserId(req) {
+  return (
     req.user?.userId ??
     req.user?.user_id ??
     req.user?.id ??
-    req.user?.sub;
+    req.user?.sub
+  );
+}
 
-  const { conceptId, explanationMode, sessionId } = req.body;
+// Handle errors consistently, including AI rate limits.
+function handleTeachingError(err, res, operation) {
+  const rawStatus = err.response?.status ?? err.status;
+  const status = Number(rawStatus);
 
-  if (!userId || !conceptId) {
+  console.error(`${operation} error:`, {
+    status: Number.isFinite(status) ? status : 500,
+    details: err.response?.data || err.message,
+  });
+
+  if (status === 429) {
+    const retryAfter =
+      err.response?.headers?.["retry-after"] ??
+      err.response?.headers?.get?.("retry-after");
+
+    if (retryAfter != null) {
+      res.set("Retry-After", String(retryAfter));
+    }
+
+    return res.status(429).json({
+      error: "AI service rate limit exceeded",
+      message:
+        "The AI service has reached its request or token limit. Please try again later.",
+    });
+  }
+
+  if (status === 503) {
+    return res.status(503).json({
+      error: "AI service temporarily unavailable",
+      message:
+        "The AI service is currently unavailable. Please try again later.",
+    });
+  }
+
+  return res.status(500).json({
+    error: `Failed to ${operation.toLowerCase()}`,
+  });
+}
+
+// ------------------------------------------------------
+// 1. GENERATE EXPLANATION
+// ------------------------------------------------------
+// Modes: simple | detailed | example |
+// step_by_step | exam_oriented
+
+teachingRouter.post("/explain", async (req, res) => {
+  const userId = getUserId(req);
+
+  const {
+    conceptId,
+    explanationMode,
+    sessionId,
+  } = req.body ?? {};
+
+  if (!userId) {
+    return res.status(401).json({
+      error: "Authenticated user ID was not found.",
+    });
+  }
+
+  if (
+    typeof conceptId !== "string" ||
+    !conceptId.trim()
+  ) {
     return res.status(400).json({
       error: "conceptId is required.",
     });
@@ -27,51 +91,63 @@ teachingRouter.post("/explain", async (req, res) => {
     const masteryRow = await query(
       `SELECT mastery_score
        FROM concept_mastery
-       WHERE user_id = $1 AND concept_id = $2`,
-      [userId, conceptId]
+       WHERE user_id = $1
+         AND concept_id = $2`,
+      [userId, conceptId.trim()]
     );
 
-    const currentMastery = masteryRow.rows[0]?.mastery_score ?? 0;
+    const currentMastery =
+      masteryRow.rows[0]?.mastery_score ?? 0;
 
     const explanation = await aiService.teachConcept({
       userId,
-      conceptId,
+      conceptId: conceptId.trim(),
       explanationMode: explanationMode || "simple",
       currentMastery,
     });
 
     await query(
       `INSERT INTO ai_interactions
-         (user_id, concept_id, session_id, interaction_type, ai_response)
+         (
+           user_id,
+           concept_id,
+           session_id,
+           interaction_type,
+           ai_response
+         )
        VALUES ($1, $2, $3, 'explanation', $4)`,
-      [userId, conceptId, sessionId || null, explanation.text]
+      [
+        userId,
+        conceptId.trim(),
+        sessionId || null,
+        explanation.text,
+      ]
     );
 
     return res.json(explanation);
   } catch (err) {
-    console.error(
-      "Generate explanation error:",
-      err.response?.status,
-      err.response?.data || err.message
+    return handleTeachingError(
+      err,
+      res,
+      "Generate explanation"
     );
-
-    return res.status(500).json({
-      error: "Failed to generate explanation",
-    });
   }
 });
 
-// RAG-backed doubt support
+// ------------------------------------------------------
+// 2. RAG-BACKED DOUBT SUPPORT
+// ------------------------------------------------------
 
 teachingRouter.post("/ask", async (req, res) => {
-  const userId =
-    req.user?.userId ??
-    req.user?.user_id ??
-    req.user?.id ??
-    req.user?.sub;
+  const userId = getUserId(req);
 
-  const { conceptId, question, sessionId, stepId, subjectId } =
-    req.body ?? {};
+  const {
+    conceptId,
+    question,
+    sessionId,
+    stepId,
+    subjectId,
+  } = req.body ?? {};
 
   if (!userId) {
     return res.status(401).json({
@@ -93,7 +169,8 @@ teachingRouter.post("/ask", async (req, res) => {
   try {
     let resolvedSubjectId = subjectId || null;
 
-    // Resolve the subject from this user's learning path.
+    // Resolve subject from the authenticated user's
+    // learning path when no subjectId was supplied.
     if (!resolvedSubjectId && stepId) {
       const stepResult = await query(
         `SELECT COALESCE(
@@ -101,9 +178,12 @@ teachingRouter.post("/ask", async (req, res) => {
            (
              SELECT s.subject_id
              FROM topic_concepts tc
-             JOIN topics t ON t.topic_id = tc.topic_id
-             JOIN units u ON u.unit_id = t.unit_id
-             JOIN syllabi s ON s.syllabus_id = u.syllabus_id
+             JOIN topics t
+               ON t.topic_id = tc.topic_id
+             JOIN units u
+               ON u.unit_id = t.unit_id
+             JOIN syllabi s
+               ON s.syllabus_id = u.syllabus_id
              WHERE tc.concept_id = lps.concept_id
              ORDER BY s.uploaded_at DESC
              LIMIT 1
@@ -118,7 +198,8 @@ teachingRouter.post("/ask", async (req, res) => {
         [stepId, userId, conceptId.trim()]
       );
 
-      resolvedSubjectId = stepResult.rows[0]?.subject_id || null;
+      resolvedSubjectId =
+        stepResult.rows[0]?.subject_id || null;
     }
 
     if (!resolvedSubjectId) {
@@ -137,8 +218,15 @@ teachingRouter.post("/ask", async (req, res) => {
 
     await query(
       `INSERT INTO ai_interactions
-         (user_id, concept_id, session_id, interaction_type,
-          user_message, ai_response, retrieved_context)
+         (
+           user_id,
+           concept_id,
+           session_id,
+           interaction_type,
+           user_message,
+           ai_response,
+           retrieved_context
+         )
        VALUES ($1, $2, $3, 'doubt', $4, $5, $6)`,
       [
         userId,
@@ -152,30 +240,37 @@ teachingRouter.post("/ask", async (req, res) => {
 
     return res.json(answer);
   } catch (err) {
-    console.error(
-      "Ask doubt error:",
-      err.response?.status,
-      err.response?.data || err.message
+    return handleTeachingError(
+      err,
+      res,
+      "Answer doubt"
     );
-
-    return res.status(500).json({
-      error: "Failed to answer doubt",
-    });
   }
 });
 
+// ------------------------------------------------------
+// 3. RE-TEACHING AFTER POOR PERFORMANCE
+// ------------------------------------------------------
 
-// Re-teaching after poor post-teaching performance
 teachingRouter.post("/reteach", async (req, res) => {
-  const userId =
-    req.user?.userId ??
-    req.user?.user_id ??
-    req.user?.id ??
-    req.user?.sub;
+  const userId = getUserId(req);
 
-  const { conceptId, weakSubConceptId, lastAttemptSummary } = req.body;
+  const {
+    conceptId,
+    weakSubConceptId,
+    lastAttemptSummary,
+  } = req.body ?? {};
 
-  if (!userId || !conceptId) {
+  if (!userId) {
+    return res.status(401).json({
+      error: "Authenticated user ID was not found.",
+    });
+  }
+
+  if (
+    typeof conceptId !== "string" ||
+    !conceptId.trim()
+  ) {
     return res.status(400).json({
       error: "conceptId is required.",
     });
@@ -184,28 +279,33 @@ teachingRouter.post("/reteach", async (req, res) => {
   try {
     const result = await aiService.reteach({
       userId,
-      conceptId,
+      conceptId: conceptId.trim(),
       weakSubConceptId,
       lastAttemptSummary,
     });
 
     await query(
       `INSERT INTO ai_interactions
-         (user_id, concept_id, interaction_type, ai_response)
+         (
+           user_id,
+           concept_id,
+           interaction_type,
+           ai_response
+         )
        VALUES ($1, $2, 'reteach', $3)`,
-      [userId, conceptId, result.text]
+      [
+        userId,
+        conceptId.trim(),
+        result.text,
+      ]
     );
 
     return res.json(result);
   } catch (err) {
-    console.error(
-      "Re-teach error:",
-      err.response?.status,
-      err.response?.data || err.message
+    return handleTeachingError(
+      err,
+      res,
+      "Generate re-teaching content"
     );
-
-    return res.status(500).json({
-      error: "Failed to generate re-teaching content",
-    });
   }
 });
