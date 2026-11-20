@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from threading import Lock
 
-from openai import APIStatusError, OpenAI, RateLimitError
+from openai import (
+    APIStatusError,
+    OpenAI,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,9 @@ class LLMClient:
         )
 
         self.max_retry_wait = float(
-            os.getenv("LLM_MAX_RETRY_WAIT_SECONDS", "30")
+            os.getenv(
+                "LLM_MAX_RETRY_WAIT_SECONDS", "30"
+            )
         )
 
         if self.timeout <= 0:
@@ -87,21 +93,16 @@ class LLMClient:
         return self._client
 
     def _get_retry_after(self, exc):
-        """
-        Read Retry-After from the provider response.
-
-        Supports:
-        - Numeric seconds
-        - HTTP-date format
-
-        Returns None if unavailable or invalid.
-        """
-        response = getattr(exc, "response", None)
+        response = getattr(
+            exc, "response", None
+        )
 
         if response is None:
             return None
 
-        headers = getattr(response, "headers", None)
+        headers = getattr(
+            response, "headers", None
+        )
 
         if headers is None:
             return None
@@ -117,76 +118,72 @@ class LLMClient:
             pass
 
         try:
-            retry_date = parsedate_to_datetime(value)
+            retry_date = parsedate_to_datetime(
+                value
+            )
 
             if retry_date.tzinfo is None:
                 retry_date = retry_date.replace(
                     tzinfo=timezone.utc
                 )
 
-            now = datetime.now(timezone.utc)
-
             return max(
                 0.0,
-                (retry_date - now).total_seconds()
+                (
+                    retry_date
+                    - datetime.now(timezone.utc)
+                ).total_seconds(),
             )
 
-        except (ValueError, TypeError, OverflowError):
+        except (
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
             logger.warning(
                 "Invalid Retry-After header: %s",
                 value,
             )
-
             return None
 
     def _retry_delay(self, exc, attempt):
-        """
-        Calculate retry delay.
-
-        Prefer the provider's Retry-After value.
-        Otherwise use exponential backoff
-        with a small amount of jitter.
-        """
-        retry_after = self._get_retry_after(exc)
+        retry_after = self._get_retry_after(
+            exc
+        )
 
         if retry_after is not None:
             return retry_after
 
-        base_delay = min(
-            2 ** attempt,
-            8
+        return (
+            min(2 ** attempt, 8)
+            + random.uniform(0, 0.5)
         )
 
-        jitter = random.uniform(0, 0.5)
-
-        return base_delay + jitter
-
     def _wait_or_raise(self, exc, attempt):
-        """
-        Retry only when the provider's required
-        wait fits within the configured limit.
-        """
         if attempt >= self.max_retries:
             logger.error(
-                "LLM request failed after %d attempts",
+                "LLM request failed after "
+                "%d attempts",
                 attempt,
             )
             raise exc
 
-        delay = self._retry_delay(exc, attempt)
+        delay = self._retry_delay(
+            exc, attempt
+        )
 
         if delay > self.max_retry_wait:
             logger.warning(
-                "Required retry delay %.2fs exceeds "
-                "maximum %.2fs. Returning provider error.",
+                "Retry delay %.2fs exceeds "
+                "configured maximum %.2fs",
                 delay,
                 self.max_retry_wait,
             )
             raise exc
 
         logger.warning(
-            "Retrying LLM request in %.2f seconds "
-            "(attempt %d/%d)",
+            "Retrying LLM request in "
+            "%.2f seconds (attempt %d/%d)",
             delay,
             attempt + 1,
             self.max_retries,
@@ -201,17 +198,6 @@ class LLMClient:
         max_tokens=1024,
         response_format="json_object",
     ):
-        """
-        Generate an LLM completion.
-
-        Handles:
-        - Groq rate limits
-        - Retry-After headers
-        - Temporary provider failures
-        - Empty responses
-        - Truncated responses
-        - JSON response formatting
-        """
         if max_tokens < 1:
             raise ValueError(
                 "max_tokens must be positive"
@@ -222,7 +208,8 @@ class LLMClient:
         token_limit = max_tokens
         truncation_retries = 0
 
-        # One optional retry for truncated output.
+        # Preserve the existing behavior:
+        # Retry truncated output only once.
         while True:
             request = {
                 "model": self.model,
@@ -236,9 +223,21 @@ class LLMClient:
                         "content": user,
                     },
                 ],
-                "max_tokens": token_limit,
+                "max_completion_tokens": (
+                    token_limit
+                ),
                 "temperature": 0,
             }
+
+            # Reduce reasoning-token consumption
+            # for supported GPT-OSS models.
+            if self.model in (
+                "openai/gpt-oss-20b",
+                "openai/gpt-oss-120b",
+            ):
+                request["reasoning_effort"] = (
+                    "low"
+                )
 
             if response_format:
                 request["response_format"] = {
@@ -249,13 +248,13 @@ class LLMClient:
 
             for attempt in range(
                 1,
-                self.max_retries + 1
+                self.max_retries + 1,
             ):
                 try:
                     logger.info(
                         "LLM request: provider=%s "
                         "model=%s attempt=%d/%d "
-                        "max_tokens=%d",
+                        "max_completion_tokens=%d",
                         self.provider,
                         self.model,
                         attempt,
@@ -274,7 +273,9 @@ class LLMClient:
                             "LLM returned no choices"
                         )
 
-                    choice = response.choices[0]
+                    choice = (
+                        response.choices[0]
+                    )
 
                     content = (
                         choice.message.content or ""
@@ -315,7 +316,8 @@ class LLMClient:
 
                             logger.warning(
                                 "LLM output truncated. "
-                                "Retrying with max_tokens=%d",
+                                "Retrying once with "
+                                "max_completion_tokens=%d",
                                 token_limit,
                             )
 
@@ -324,10 +326,10 @@ class LLMClient:
 
                         raise RuntimeError(
                             "LLM output was truncated "
-                            "twice. Initial max_tokens="
-                            f"{max_tokens}; retry "
-                            f"max_tokens={token_limit}. "
-                            "Check model output limits."
+                            "twice. Initial token "
+                            f"limit={max_tokens}; "
+                            "retry token limit="
+                            f"{token_limit}."
                         )
 
                     if not content.strip():
@@ -341,7 +343,7 @@ class LLMClient:
                 except RateLimitError as exc:
                     logger.warning(
                         "Groq rate limit exceeded: "
-                        "attempt=%d/%d status=429",
+                        "attempt=%d/%d",
                         attempt,
                         self.max_retries,
                     )

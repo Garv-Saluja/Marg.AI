@@ -6,60 +6,65 @@ Provides:
 - POST /teach/explain
 - POST /teach/reteach
 
-Teaching responses are plain text, so JSON response mode is disabled.
-
-Handles:
-- Groq API rate limits (429)
-- Temporary AI service failures (503)
-- Unexpected generation errors (500)
+Teaching responses are plain text.
+JSON response mode is disabled.
 """
 
 import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
+
 from openai import (
     APIConnectionError,
     APITimeoutError,
     APIStatusError,
     RateLimitError,
 )
+
 from pydantic import BaseModel, Field
 
 from app.llm_client import llm
 
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/teach", tags=["teach"])
+router = APIRouter(
+    prefix="/teach",
+    tags=["teach"],
+)
 
 
 EXPLANATION_MODE_INSTRUCTIONS = {
     "simple": (
-        "Explain simply, avoid jargon, and use one relatable analogy."
+        "Explain simply, avoid jargon, "
+        "and use one relatable analogy."
     ),
     "detailed": (
-        "Give a thorough, technically accurate explanation suitable "
-        "for university exam preparation."
+        "Give a technically accurate "
+        "explanation suitable for "
+        "university exam preparation."
     ),
     "example": (
-        "Focus on two concrete worked examples, explaining each step."
+        "Focus on two concrete worked "
+        "examples, explaining each step."
     ),
     "step_by_step": (
-        "Explain the concept in clear, numbered steps."
+        "Explain the concept in clear, "
+        "numbered steps."
     ),
     "exam_oriented": (
-        "Give an exam-oriented explanation with a definition, key points, "
+        "Give an exam-oriented explanation "
+        "with a definition, key points, "
         "an example, and a short conclusion."
     ),
 }
 
 
-def handle_llm_error(exc: Exception, operation: str):
-    """
-    Translate LLM provider errors into meaningful
-    HTTP responses for the Express backend.
-    """
-
+def handle_llm_error(
+    exc: Exception,
+    operation: str,
+):
     if isinstance(exc, RateLimitError):
         logger.warning(
             "%s failed: Groq rate limit exceeded",
@@ -68,15 +73,21 @@ def handle_llm_error(exc: Exception, operation: str):
 
         headers = {}
 
-        response = getattr(exc, "response", None)
+        response = getattr(
+            exc, "response", None
+        )
 
         if response is not None:
-            retry_after = response.headers.get(
-                "retry-after"
+            retry_after = (
+                response.headers.get(
+                    "retry-after"
+                )
             )
 
             if retry_after:
-                headers["Retry-After"] = retry_after
+                headers["Retry-After"] = (
+                    retry_after
+                )
 
         raise HTTPException(
             status_code=429,
@@ -92,7 +103,7 @@ def handle_llm_error(exc: Exception, operation: str):
         (APIConnectionError, APITimeoutError),
     ):
         logger.error(
-            "%s failed: AI provider connection error: %s",
+            "%s failed: AI connection error: %s",
             operation,
             str(exc),
         )
@@ -100,8 +111,8 @@ def handle_llm_error(exc: Exception, operation: str):
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI provider is temporarily unavailable. "
-                "Please try again later."
+                "AI provider is temporarily "
+                "unavailable. Try again later."
             ),
         ) from exc
 
@@ -112,18 +123,42 @@ def handle_llm_error(exc: Exception, operation: str):
             exc.status_code,
         )
 
-        if exc.status_code in (500, 502, 503, 504):
+        if exc.status_code in (
+            500, 502, 503, 504
+        ):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "AI provider is temporarily unavailable. "
-                    "Please try again later."
+                    "AI provider is temporarily "
+                    "unavailable."
                 ),
             ) from exc
 
         raise HTTPException(
             status_code=502,
-            detail="AI provider rejected the generation request.",
+            detail=(
+                "AI provider rejected "
+                "the generation request."
+            ),
+        ) from exc
+
+    if (
+        isinstance(exc, RuntimeError)
+        and "truncated twice" in str(exc)
+    ):
+        logger.error(
+            "%s failed: output exceeded "
+            "token budget: %s",
+            operation,
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "AI generated an incomplete "
+                "response. Please retry."
+            ),
         ) from exc
 
     logger.exception(
@@ -133,13 +168,17 @@ def handle_llm_error(exc: Exception, operation: str):
 
     raise HTTPException(
         status_code=500,
-        detail="Failed to generate AI teaching content.",
+        detail=(
+            "Failed to generate "
+            "AI teaching content."
+        ),
     ) from exc
 
 
 class ExplainRequest(BaseModel):
     userId: str
     conceptId: str
+
     explanationMode: Literal[
         "simple",
         "detailed",
@@ -147,6 +186,7 @@ class ExplainRequest(BaseModel):
         "step_by_step",
         "exam_oriented",
     ] = "simple"
+
     currentMastery: float = Field(
         default=0,
         ge=0,
@@ -176,16 +216,21 @@ def explain_concept(req: ExplainRequest):
         level_hint = (
             "The student has some understanding. "
             "Build on the fundamentals "
-            "and introduce appropriate technical detail."
+            "and introduce appropriate "
+            "technical detail."
         )
 
     system = (
-        "You are an expert, encouraging computer science tutor "
-        "for a B.Tech student. "
-        "Return a natural-language explanation, not JSON. "
+        "You are an expert computer science "
+        "tutor for a B.Tech student. "
+        "Return a natural-language explanation, "
+        "not JSON. "
         f"{EXPLANATION_MODE_INSTRUCTIONS[req.explanationMode]} "
         f"{level_hint} "
-        "Keep the explanation focused and useful."
+        "Keep the explanation focused and useful. "
+        "Keep the explanation under 350 words. "
+        "Use clear, simple English. "
+        "Avoid unnecessary repetition."
     )
 
     user = (
@@ -197,7 +242,7 @@ def explain_concept(req: ExplainRequest):
         text = llm.complete(
             system=system,
             user=user,
-            max_tokens=1000,
+            max_tokens=2000,
             response_format=None,
         )
 
@@ -233,12 +278,14 @@ def reteach(req: ReteachRequest):
 
     system = (
         "You are a patient computer science tutor. "
-        "The student struggled with this concept previously. "
-        "Explain it using a different, simple analogy "
-        "and one concrete example. "
+        "The student struggled with this concept "
+        "previously. "
+        "Explain it using a different, simple "
+        "analogy and one concrete example. "
         "Directly address the likely misconception. "
         "Return natural-language text, not JSON. "
-        "Be concise: use at most five short paragraphs. "
+        "Be concise: use at most five short "
+        "paragraphs and stay under 300 words. "
         "Avoid repeating the same explanation."
     )
 
@@ -254,7 +301,7 @@ def reteach(req: ReteachRequest):
         text = llm.complete(
             system=system,
             user=user,
-            max_tokens=1000,
+            max_tokens=2000,
             response_format=None,
         )
 
