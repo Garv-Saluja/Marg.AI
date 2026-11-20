@@ -36,9 +36,7 @@ class LLMClient:
         )
 
         self.max_retry_wait = float(
-            os.getenv(
-                "LLM_MAX_RETRY_WAIT_SECONDS", "30"
-            )
+            os.getenv("LLM_MAX_RETRY_WAIT_SECONDS", "30")
         )
 
         if self.timeout <= 0:
@@ -67,8 +65,7 @@ class LLMClient:
             if self._client is None:
                 if self.provider != "groq":
                     raise RuntimeError(
-                        f"Unsupported LLM_PROVIDER: "
-                        f"{self.provider}"
+                        f"Unsupported LLM_PROVIDER: {self.provider}"
                     )
 
                 api_key = os.getenv(
@@ -83,9 +80,7 @@ class LLMClient:
 
                 self._client = OpenAI(
                     api_key=api_key,
-                    base_url=(
-                        "https://api.groq.com/openai/v1"
-                    ),
+                    base_url="https://api.groq.com/openai/v1",
                     timeout=self.timeout,
                     max_retries=0,
                 )
@@ -93,16 +88,12 @@ class LLMClient:
         return self._client
 
     def _get_retry_after(self, exc):
-        response = getattr(
-            exc, "response", None
-        )
+        response = getattr(exc, "response", None)
 
         if response is None:
             return None
 
-        headers = getattr(
-            response, "headers", None
-        )
+        headers = getattr(response, "headers", None)
 
         if headers is None:
             return None
@@ -114,13 +105,12 @@ class LLMClient:
 
         try:
             return max(0.0, float(value))
+
         except (ValueError, TypeError):
             pass
 
         try:
-            retry_date = parsedate_to_datetime(
-                value
-            )
+            retry_date = parsedate_to_datetime(value)
 
             if retry_date.tzinfo is None:
                 retry_date = retry_date.replace(
@@ -130,8 +120,7 @@ class LLMClient:
             return max(
                 0.0,
                 (
-                    retry_date
-                    - datetime.now(timezone.utc)
+                    retry_date - datetime.now(timezone.utc)
                 ).total_seconds(),
             )
 
@@ -147,9 +136,7 @@ class LLMClient:
             return None
 
     def _retry_delay(self, exc, attempt):
-        retry_after = self._get_retry_after(
-            exc
-        )
+        retry_after = self._get_retry_after(exc)
 
         if retry_after is not None:
             return retry_after
@@ -162,28 +149,24 @@ class LLMClient:
     def _wait_or_raise(self, exc, attempt):
         if attempt >= self.max_retries:
             logger.error(
-                "LLM request failed after "
-                "%d attempts",
+                "LLM request failed after %d attempts",
                 attempt,
             )
             raise exc
 
-        delay = self._retry_delay(
-            exc, attempt
-        )
+        delay = self._retry_delay(exc, attempt)
 
         if delay > self.max_retry_wait:
             logger.warning(
-                "Retry delay %.2fs exceeds "
-                "configured maximum %.2fs",
+                "Retry delay %.2fs exceeds maximum %.2fs",
                 delay,
                 self.max_retry_wait,
             )
             raise exc
 
         logger.warning(
-            "Retrying LLM request in "
-            "%.2f seconds (attempt %d/%d)",
+            "Retrying LLM request in %.2f seconds "
+            "(attempt %d/%d)",
             delay,
             attempt + 1,
             self.max_retries,
@@ -208,8 +191,7 @@ class LLMClient:
         token_limit = max_tokens
         truncation_retries = 0
 
-        # Preserve the existing behavior:
-        # Retry truncated output only once.
+        # Retry truncated output at most once.
         while True:
             request = {
                 "model": self.model,
@@ -223,21 +205,23 @@ class LLMClient:
                         "content": user,
                     },
                 ],
-                "max_completion_tokens": (
-                    token_limit
-                ),
+
+                # Compatible with the installed SDK.
+                "max_tokens": token_limit,
+
                 "temperature": 0,
             }
 
-            # Reduce reasoning-token consumption
-            # for supported GPT-OSS models.
+            # GPT-OSS reasoning configuration.
+            # extra_body allows provider-specific fields
+            # on older OpenAI SDK versions.
             if self.model in (
                 "openai/gpt-oss-20b",
                 "openai/gpt-oss-120b",
             ):
-                request["reasoning_effort"] = (
-                    "low"
-                )
+                request["extra_body"] = {
+                    "reasoning_effort": "low"
+                }
 
             if response_format:
                 request["response_format"] = {
@@ -247,14 +231,13 @@ class LLMClient:
             truncated = False
 
             for attempt in range(
-                1,
-                self.max_retries + 1,
+                1, self.max_retries + 1
             ):
                 try:
                     logger.info(
                         "LLM request: provider=%s "
                         "model=%s attempt=%d/%d "
-                        "max_completion_tokens=%d",
+                        "max_tokens=%d",
                         self.provider,
                         self.model,
                         attempt,
@@ -273,18 +256,13 @@ class LLMClient:
                             "LLM returned no choices"
                         )
 
-                    choice = (
-                        response.choices[0]
-                    )
+                    choice = response.choices[0]
 
                     content = (
                         choice.message.content or ""
                     )
 
-                    finish_reason = (
-                        choice.finish_reason
-                    )
-
+                    finish_reason = choice.finish_reason
                     usage = response.usage
 
                     logger.info(
@@ -310,14 +288,12 @@ class LLMClient:
                         if truncation_retries == 0:
                             truncation_retries = 1
 
-                            token_limit = (
-                                max_tokens * 2
-                            )
+                            token_limit = max_tokens * 2
 
                             logger.warning(
                                 "LLM output truncated. "
                                 "Retrying once with "
-                                "max_completion_tokens=%d",
+                                "max_tokens=%d",
                                 token_limit,
                             )
 
@@ -326,10 +302,9 @@ class LLMClient:
 
                         raise RuntimeError(
                             "LLM output was truncated "
-                            "twice. Initial token "
-                            f"limit={max_tokens}; "
-                            "retry token limit="
-                            f"{token_limit}."
+                            "twice. Initial max_tokens="
+                            f"{max_tokens}; retry "
+                            f"max_tokens={token_limit}."
                         )
 
                     if not content.strip():
