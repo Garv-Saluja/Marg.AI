@@ -89,14 +89,26 @@ function AssessmentContent() {
     };
   }, [conceptId, subjectId, assessmentType, isFullSyllabus]);
 
-  const conceptName = conceptId
-    ? decodeURIComponent(conceptId)
-        .replace(/[._-]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .replace(/\bdbms\b/gi, "DBMS")
-        .replace(/\b\w/g, (char) => char.toUpperCase())
-    : "Full Syllabus";
+  // Only format the display label. Keep conceptId unchanged for all API calls.
+  const conceptName = (() => {
+    if (!conceptId) return "Full Syllabus";
+
+    let name = conceptId;
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      // A malformed percent-escape should not break the assessment page.
+    }
+
+    return name
+      .replace(/^generated[._-]/i, "")
+      .replace(/[_-][a-f0-9]{8,}$/i, "")
+      .replace(/[._-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (char) => char.toUpperCase())
+      .replace(/\bDbms\b/g, "DBMS") || "Concept";
+  })();
 
   async function submitAnswer() {
     const question = questions[current];
