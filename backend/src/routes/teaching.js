@@ -138,8 +138,13 @@ teachingRouter.post("/explain", async (req, res) => {
 // 2. RAG-BACKED DOUBT SUPPORT
 // ------------------------------------------------------
 
+
 teachingRouter.post("/ask", async (req, res) => {
-  const userId = getUserId(req);
+  const userId =
+    req.user?.userId ??
+    req.user?.user_id ??
+    req.user?.id ??
+    req.user?.sub;
 
   const {
     conceptId,
@@ -151,7 +156,7 @@ teachingRouter.post("/ask", async (req, res) => {
 
   if (!userId) {
     return res.status(401).json({
-      error: "Authenticated user ID was not found.",
+      error: "Authentication required.",
     });
   }
 
@@ -166,71 +171,125 @@ teachingRouter.post("/ask", async (req, res) => {
     });
   }
 
-  try {
-    let resolvedSubjectId = subjectId || null;
+  const concept = conceptId.trim();
 
-    // Resolve subject from the authenticated user's
-    // learning path when no subjectId was supplied.
+  try {
+    let resolvedSubjectId = null;
+
+    // 1. Validate an explicitly supplied subject.
+    if (subjectId) {
+      const result = await query(
+        `SELECT DISTINCT s.subject_id
+         FROM syllabi s
+         WHERE s.subject_id = $1::uuid
+           AND s.uploaded_by = $2
+         LIMIT 1`,
+        [subjectId, userId]
+      );
+
+      if (!result.rows.length) {
+        return res.status(403).json({
+          error:
+            "Subject not found in your uploaded syllabi.",
+        });
+      }
+
+      resolvedSubjectId = result.rows[0].subject_id;
+    }
+
+    // 2. Resolve the subject from a learning-path step.
     if (!resolvedSubjectId && stepId) {
-      const stepResult = await query(
-        `SELECT COALESCE(
-           lp.subject_id,
-           (
-             SELECT s.subject_id
-             FROM topic_concepts tc
-             JOIN topics t
-               ON t.topic_id = tc.topic_id
-             JOIN units u
-               ON u.unit_id = t.unit_id
-             JOIN syllabi s
-               ON s.syllabus_id = u.syllabus_id
-             WHERE tc.concept_id = lps.concept_id
-             ORDER BY s.uploaded_at DESC
-             LIMIT 1
-           )
-         ) AS subject_id
+      const result = await query(
+        `SELECT DISTINCT s.subject_id
          FROM learning_path_steps lps
          JOIN learning_paths lp
-           ON lp.learning_path_id = lps.learning_path_id
+           ON lp.learning_path_id =
+              lps.learning_path_id
+         JOIN syllabi s
+           ON s.subject_id = lp.subject_id
          WHERE lps.step_id = $1::uuid
            AND lp.user_id = $2
-           AND lps.concept_id = $3`,
-        [stepId, userId, conceptId.trim()]
+           AND lps.concept_id = $3
+           AND s.uploaded_by = $2
+         LIMIT 1`,
+        [stepId, userId, concept]
       );
 
       resolvedSubjectId =
-        stepResult.rows[0]?.subject_id || null;
+        result.rows[0]?.subject_id ?? null;
     }
 
+    // 3. Find the concept's subject from the
+    // authenticated user's uploaded syllabus.
+    if (!resolvedSubjectId) {
+      const result = await query(
+        `SELECT DISTINCT s.subject_id
+         FROM topic_concepts tc
+         JOIN topics t
+           ON t.topic_id = tc.topic_id
+         JOIN units u
+           ON u.unit_id = t.unit_id
+         JOIN syllabi s
+           ON s.syllabus_id = u.syllabus_id
+         WHERE tc.concept_id = $1
+           AND s.uploaded_by = $2`,
+        [concept, userId]
+      );
+
+      if (result.rows.length === 1) {
+        resolvedSubjectId =
+          result.rows[0].subject_id;
+      }
+    }
+
+    // 4. Fallback only if the student has
+    // exactly one uploaded subject.
+    if (!resolvedSubjectId) {
+      const result = await query(
+        `SELECT DISTINCT subject_id
+         FROM syllabi
+         WHERE uploaded_by = $1`,
+        [userId]
+      );
+
+      if (result.rows.length === 1) {
+        resolvedSubjectId =
+          result.rows[0].subject_id;
+      }
+    }
+
+    // Never guess when multiple subjects exist.
     if (!resolvedSubjectId) {
       return res.status(400).json({
         error:
-          "Could not determine the subject for this concept. Open it from a valid learning path or provide its subjectId.",
+          "Unable to identify a unique syllabus for this concept. Please open the concept from a subject-linked learning path.",
       });
     }
 
+    // 5. Send the question to FastAPI RAG.
     const answer = await aiService.askDoubt({
       userId,
-      conceptId: conceptId.trim(),
+      conceptId: concept,
       question: question.trim(),
       subjectId: resolvedSubjectId,
     });
 
+    // 6. Save the interaction.
     await query(
       `INSERT INTO ai_interactions
-         (
-           user_id,
-           concept_id,
-           session_id,
-           interaction_type,
-           user_message,
-           ai_response,
-           retrieved_context
-         )
+       (
+         user_id,
+         concept_id,
+         session_id,
+         interaction_type,
+         user_message,
+         ai_response,
+         retrieved_context
+       )
        VALUES ($1, $2, $3, 'doubt', $4, $5, $6)`,
       [
         userId,
-        conceptId.trim(),
+        concept,
         sessionId || null,
         question.trim(),
         answer.text,
@@ -239,14 +298,37 @@ teachingRouter.post("/ask", async (req, res) => {
     );
 
     return res.json(answer);
+
   } catch (err) {
-    return handleTeachingError(
-      err,
-      res,
-      "Answer doubt"
-    );
+    const status =
+      err.response?.status ?? err.status;
+
+    console.error("Ask doubt error:", {
+      status,
+      details:
+        err.response?.data || err.message,
+    });
+
+    if (status === 429) {
+      return res.status(429).json({
+        error:
+          "AI service rate limit exceeded.",
+      });
+    }
+
+    if (status === 503) {
+      return res.status(503).json({
+        error:
+          "RAG or AI service is unavailable.",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to answer doubt.",
+    });
   }
 });
+
 
 // ------------------------------------------------------
 // 3. RE-TEACHING AFTER POOR PERFORMANCE
