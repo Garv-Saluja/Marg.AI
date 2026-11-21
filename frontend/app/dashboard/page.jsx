@@ -531,16 +531,21 @@ function ConceptList({ concepts, emptyMessage, weak = false }) {
 function formatConceptLabel(label) {
   if (!label) return "Unknown concept";
 
-  const value = String(label).trim();
+  let value = String(label).trim();
 
-  // Preserve human-readable labels exactly; only format machine-style IDs.
-  // This avoids truncating labels such as "Operating System Classification".
-  if (!/[._]/.test(value)) {
+  // Human-readable names from the API should remain unchanged.
+  // Only machine-generated IDs need special formatting.
+  if (!/^(generated[._-])/i.test(value) && !/[._]/.test(value)) {
     return value;
   }
 
+  // Example: generated.big_o_notation_a47f09d9af -> big_o_notation
+  value = value
+    .replace(/^generated[._-]/i, "")
+    .replace(/_[a-f0-9]{8,}$/i, "");
+
   const parts = value.split(/[._]+/).filter(Boolean);
-  if (!parts.length) return value;
+  if (!parts.length) return "Unknown concept";
 
   const specialLabels = {
     os: "Operating System",
