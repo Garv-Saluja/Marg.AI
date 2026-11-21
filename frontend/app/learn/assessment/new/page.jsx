@@ -5,6 +5,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { assessmentApi, learningPathApi } from "../../../../lib/api";
 import NavBar from "../../../../components/NavBar";
+import "./assessment-viewport.css";
 
 function AssessmentContent() {
   const params = useSearchParams();
@@ -406,7 +407,7 @@ function AssessmentContent() {
     <>
       <NavBar />
 
-      <main className="marg-container marg-page">
+      <main className="marg-container marg-page marg-assessment-screen">
         <header className="marg-assessment-header">
           <div>
             <div className="marg-eyebrow">
